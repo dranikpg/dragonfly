@@ -202,7 +202,7 @@ void SinkReplyBuilder2::Write(std::string_view str) {
 }
 
 char* SinkReplyBuilder2::ReservePiece(size_t size) {
-  if (buffer_.AppendBuffer().size() <= size)
+  if (buffer_.AppendLen() <= size)
     Flush();
 
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
@@ -236,17 +236,34 @@ void SinkReplyBuilder2::Flush() {
   if (ec)
     ec_ = ec;
 
+  size_t buffer_bytes = buffer_.InputLen();
+
   buffer_.Clear();
   vecs_.clear();
   total_size_ = 0;
+
+  if (buffer_bytes * 2 > buffer_.Capacity())
+    buffer_.Reserve(std::min(kMaxBufferSize, buffer_.Capacity() * 2));
 }
 
 void SinkReplyBuilder2::FinishScope() {
-  // If batching or aggregations are not enabled, flush
-  Flush();
+  if (!batched_ || total_size_ * 2 >= kMaxBufferSize)
+    return Flush();
 
-  // TODO: otherwise iterate over vec_ and copy items to buffer_
-  // whilst also updating their pointers
+  size_t required = total_size_ - buffer_.InputLen();
+  if (required > buffer_.AppendLen())
+    return Flush();
+
+  // Copy all extenral references to buffer to safely keep batching
+  for (iovec& vec : vecs_) {
+    if (IsInBuf(vec.iov_base))
+      continue;
+
+    void* dest = buffer_.AppendBuffer().data();
+    memcpy(dest, vec.iov_base, vec.iov_len);
+    buffer_.CommitWrite(vec.iov_len);
+    vec.iov_base = dest;
+  }
 }
 
 bool SinkReplyBuilder2::IsInBuf(const void* ptr) const {

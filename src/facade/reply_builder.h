@@ -169,6 +169,8 @@ class SinkReplyBuilder {
 
 // TMP: New version of reply builder that batches not only to a buffer, but also iovecs.
 class SinkReplyBuilder2 {
+  constexpr static size_t kMaxBufferSize = 8192;
+
   explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
   }
 
@@ -190,10 +192,25 @@ class SinkReplyBuilder2 {
     SinkReplyBuilder2* rb;
   };
 
- public:
-  void Write(std::string_view str);
+  struct BatchScope {
+    explicit BatchScope(SinkReplyBuilder2* rb) : prev_batched(rb->batched_), rb(rb) {
+      rb->batched_ = true;
+    }
+    ~BatchScope() {
+      if (!prev_batched) {
+        rb->batched_ = false;
+        rb->Flush();
+      }
+    }
+
+   private:
+    bool prev_batched;
+    SinkReplyBuilder2* rb;
+  };
 
  protected:
+  void Write(std::string_view str);
+
   void Flush();        // Send all accumulated data and reset to clear state
   void FinishScope();  // Called when scope ends
 
@@ -210,7 +227,7 @@ class SinkReplyBuilder2 {
   io::Sink* sink_;
   std::error_code ec_;
 
-  bool scoped_;
+  bool scoped_ = false, batched_ = false;
 
   size_t total_size_ = 0;  // sum of vec_ lengths
   base::IoBuf buffer_;
