@@ -23,6 +23,10 @@ enum class ReplyMode {
 
 class SinkReplyBuilder {
  public:
+  io::Sink* sink() {
+    return sink_;
+  }
+
   struct MGetStorage {
     MGetStorage* next = nullptr;
     char data[1];
@@ -169,6 +173,8 @@ class SinkReplyBuilder {
 
 // TMP: New version of reply builder that batches not only to a buffer, but also iovecs.
 class SinkReplyBuilder2 {
+ public:
+  constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
 
   explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
@@ -210,6 +216,9 @@ class SinkReplyBuilder2 {
 
  protected:
   void Write(std::string_view str);
+  template <typename... Args> constexpr void Write(Args... strs) {
+    (Write(strs), ...);
+  }
 
   void Flush();        // Send all accumulated data and reset to clear state
   void FinishScope();  // Called when scope ends
@@ -313,6 +322,36 @@ class RedisReplyBuilder : public SinkReplyBuilder {
                              CollectionType type);
 
   bool is_resp3_ = false;
+};
+
+// Redis reply builder interface for sending RESP data.
+class RedisReplyBuilder2 : public SinkReplyBuilder2 {
+ public:
+  RedisReplyBuilder2(io::Sink* sink) : SinkReplyBuilder2(sink) {
+  }
+
+  void SendSimpleString(std::string_view str);
+  void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  void SendLong(long val);
+  void SendDouble(double val);  // RESP: Number
+
+  void StartArray(unsigned len);
+
+  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr, bool with_scores);
+
+  bool IsResp3() const {
+    return resp3_;
+  }
+
+  void SetResp3(bool resp3) {
+    resp3_ = resp3;
+  }
+
+ private:
+  void WriteIntWithPrefix(char prefix, int64_t val);  // FastIntToBuffer directly into ReservePiece
+
+  bool resp3_;
 };
 
 class ReqSerializer {

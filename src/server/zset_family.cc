@@ -182,8 +182,12 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result,
 
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendScoredArray(result.value(), params.with_scores);
+
+  // auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  // rb->SendScoredArray(result.value(), params.with_scores);
+
+  facade::RedisReplyBuilder2 rb2(cntx->reply_builder()->sink());
+  rb2.SendScoredArray(result.value(), params.with_scores);
 }
 
 OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs& op_args,

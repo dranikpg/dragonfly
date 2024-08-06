@@ -195,7 +195,7 @@ size_t SinkReplyBuilder::UsedMemory() const {
 
 void SinkReplyBuilder2::Write(std::string_view str) {
   DCHECK(scoped_);
-  if (str.size() >= 32)
+  if (str.size() > kMaxInlineSize)
     WriteRef(str);
   else
     WritePiece(str);
@@ -723,6 +723,61 @@ void ReqSerializer::SendCommand(std::string_view str) {
 
   iovec v[] = {IoVec(str), IoVec(kCRLF)};
   ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
+}
+
+void RedisReplyBuilder2::SendSimpleString(std::string_view str) {
+  ReplyScope scope(this);
+  Write(kSimplePref, str, kCRLF);
+}
+
+void RedisReplyBuilder2::SendBulkString(std::string_view str) {
+  ReplyScope scope(this);
+  WriteIntWithPrefix('$', str.size());
+  Write(kCRLF, str, kCRLF);
+}
+
+void RedisReplyBuilder2::SendLong(long val) {
+  ReplyScope scope(this);
+  WriteIntWithPrefix(':', val);
+}
+
+void RedisReplyBuilder2::SendDouble(double val) {
+  char buf[DoubleToStringConverter::kBase10MaximalLength + 1];
+  static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
+
+  StringBuilder sb(buf, ABSL_ARRAYSIZE(buf));
+  dfly_conv.ToShortest(val, &sb);
+
+  if (resp3_) {
+    ReplyScope scope(this);
+    Write(",", sb.Finalize(), kCRLF);
+  } else {
+    SendBulkString(sb.Finalize());
+  }
+}
+
+void RedisReplyBuilder2::StartArray(unsigned len) {
+  ReplyScope scope(this);
+  WritePiece(absl::StrCat("*", len, kCRLF));
+}
+
+void RedisReplyBuilder2::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                                         bool with_scores) {
+  ReplyScope scope(this);
+  StartArray(with_scores ? arr.size() * 2 : arr.size());
+  for (const auto& [str, score] : arr) {
+    SendBulkString(str);
+    if (with_scores)
+      SendDouble(score);
+  }
+}
+
+void RedisReplyBuilder2::WriteIntWithPrefix(char prefix, int64_t val) {
+  char* dest = ReservePiece(absl::numbers_internal::kFastToBufferSize + 1);
+  char* next = dest;
+  *next++ = prefix;
+  next = absl::numbers_internal::FastIntToBuffer(val, next);
+  CommitPiece(next - dest);
 }
 
 }  // namespace facade
