@@ -183,34 +183,33 @@ class SinkReplyBuilder2 {
   // Use with care: All send calls within a scope must keep their data alive!
   // This allows to fully eliminate copies for batches of data by using vectorized io.
   struct ReplyScope {
-    explicit ReplyScope(SinkReplyBuilder2* rb) : prev_scoped(rb->scoped_), rb(rb) {
-      rb->scoped_ = true;
+    explicit ReplyScope(SinkReplyBuilder2* rb) : prev(std::exchange(rb->scoped_, true)), rb(rb) {
     }
     ~ReplyScope() {
-      if (!prev_scoped) {
+      if (!prev) {
         rb->scoped_ = false;
         rb->FinishScope();
       }
     }
 
    private:
-    bool prev_scoped;
+    bool prev;
     SinkReplyBuilder2* rb;
   };
 
   struct ReplyAggregator {
-    explicit ReplyAggregator(SinkReplyBuilder2* rb) : prev_batched(rb->batched_), rb(rb) {
-      rb->batched_ = true;
+    explicit ReplyAggregator(SinkReplyBuilder2* rb)
+        : prev(std::exchange(rb->scoped_, true)), rb(rb) {
     }
     ~ReplyAggregator() {
-      if (!prev_batched) {
+      if (!prev) {
         rb->batched_ = false;
-        rb->Flush();
+        rb->FinishScope();
       }
     }
 
    private:
-    bool prev_batched;
+    bool prev;
     SinkReplyBuilder2* rb;
   };
 
@@ -230,8 +229,16 @@ class SinkReplyBuilder2 {
   virtual void SendProtocolError(std::string_view str) = 0;
 
  protected:
-  template <typename... Args> constexpr void Write(Args... strs) {
-    ((std::string_view{strs}.size() > kMaxInlineSize ? WriteRef(strs) : WritePiece(strs)), ...);
+  void Write(std::string_view str) {
+    str.size() > kMaxInlineSize ? WriteRef(str) : WritePiece(str);
+  }
+
+  template <size_t S> void Write(const char (&arr)[S]) {
+    WritePiece(arr);
+  }
+
+  template <typename... Args> void Write(Args&&... strs) {
+    (Write(strs), ...);
   }
 
   void Flush();        // Send all accumulated data and reset to clear state
