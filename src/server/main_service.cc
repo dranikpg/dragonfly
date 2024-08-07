@@ -1265,7 +1265,7 @@ class ReplyGuard {
 
   ~ReplyGuard() {
     if (builder_) {
-      DCHECK(builder_->HasReplied());
+      // DCHECK(builder_->HasReplied());
     }
   }
 

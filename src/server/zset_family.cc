@@ -186,7 +186,7 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result,
   // auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   // rb->SendScoredArray(result.value(), params.with_scores);
 
-  facade::RedisReplyBuilder2 rb2(cntx->reply_builder()->sink());
+  facade::RedisReplyBuilder2Ext rb2(cntx->reply_builder()->sink());
   rb2.SendScoredArray(result.value(), params.with_scores);
 }
 

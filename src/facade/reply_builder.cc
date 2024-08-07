@@ -193,14 +193,6 @@ size_t SinkReplyBuilder::UsedMemory() const {
   return dfly::HeapSize(batch_);
 }
 
-void SinkReplyBuilder2::Write(std::string_view str) {
-  DCHECK(scoped_);
-  if (str.size() > kMaxInlineSize)
-    WriteRef(str);
-  else
-    WritePiece(str);
-}
-
 char* SinkReplyBuilder2::ReservePiece(size_t size) {
   if (buffer_.AppendLen() <= size)
     Flush();
@@ -725,6 +717,11 @@ void ReqSerializer::SendCommand(std::string_view str) {
   ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
 }
 
+void RedisReplyBuilder2::SendNull() {
+  ReplyScope scope(this);
+  Write(NullString(IsResp3()));
+}
+
 void RedisReplyBuilder2::SendSimpleString(std::string_view str) {
   ReplyScope scope(this);
   Write(kSimplePref, str, kCRLF);
@@ -756,20 +753,19 @@ void RedisReplyBuilder2::SendDouble(double val) {
   }
 }
 
-void RedisReplyBuilder2::StartArray(unsigned len) {
+void RedisReplyBuilder2::SendNullArray() {
   ReplyScope scope(this);
-  WritePiece(absl::StrCat("*", len, kCRLF));
+  Write("*-1", kCRLF);
 }
 
-void RedisReplyBuilder2::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
-                                         bool with_scores) {
+void RedisReplyBuilder2::StartCollection(unsigned len, CollectionType ct) {
   ReplyScope scope(this);
-  StartArray(with_scores ? arr.size() * 2 : arr.size());
-  for (const auto& [str, score] : arr) {
-    SendBulkString(str);
-    if (with_scores)
-      SendDouble(score);
+  if (!IsResp3()) {  // RESP2 supports only arrays
+    if (ct == MAP)
+      len *= 2;
+    ct = ARRAY;
   }
+  WritePiece(absl::StrCat(START_SYMBOLS[ct], len, kCRLF));
 }
 
 void RedisReplyBuilder2::WriteIntWithPrefix(char prefix, int64_t val) {
@@ -778,6 +774,69 @@ void RedisReplyBuilder2::WriteIntWithPrefix(char prefix, int64_t val) {
   *next++ = prefix;
   next = absl::numbers_internal::FastIntToBuffer(val, next);
   CommitPiece(next - dest);
+}
+
+void RedisReplyBuilder2::SendError(std::string_view str, std::string_view type) {
+  ReplyScope scope(this);
+
+  if (type.empty()) {
+    type = str;
+    if (type == kSyntaxErr)
+      type = kSyntaxErrType;
+  }
+  tl_facade_stats->reply_stats.err_count[type]++;
+
+  if (str[0] != '-')
+    WritePiece(kErrPref);
+  WritePiece(str);
+  WritePiece(kCRLF);
+}
+
+void RedisReplyBuilder2::SendProtocolError(std::string_view str) {
+  SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
+}
+
+void RedisReplyBuilder2Ext::SendSimpleStrArr(const facade::ArgRange& strs) {
+  ReplyScope scope(this);
+  StartArray(strs.Size());
+  for (std::string_view str : strs)
+    SendSimpleString(str);
+}
+
+void RedisReplyBuilder2Ext::SendBulkStrArr(const facade::ArgRange& strs) {
+  ReplyScope scope(this);
+  StartArray(strs.Size());
+  for (std::string_view str : strs)
+    SendBulkString(str);
+}
+
+void RedisReplyBuilder2Ext::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
+                                            bool with_scores) {
+  ReplyScope scope(this);
+  StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
+  for (const auto& [str, score] : arr) {
+    if (IsResp3())
+      StartArray(2);
+    SendBulkString(str);
+    if (with_scores)
+      SendDouble(score);
+  }
+}
+
+void RedisReplyBuilder2Ext::SendStored() {
+  SendSimpleString("OK");
+}
+
+void RedisReplyBuilder2Ext::SendSetSkipped() {
+  SendSimpleString("SKIPPED");
+}
+
+void RedisReplyBuilder2Ext::StartArray(unsigned len) {
+  StartCollection(len, CollectionType::ARRAY);
+}
+
+void RedisReplyBuilder2Ext::SendEmptyArray() {
+  StartArray(0);
 }
 
 }  // namespace facade
