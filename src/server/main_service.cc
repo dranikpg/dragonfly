@@ -1969,7 +1969,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   CHECK(result == Interpreter::RUN_OK);
 
-  SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+  SinkReplyBuilder::ReplyScope agg(cntx->reply_builder());
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
   if (!interpreter->IsResultSafe()) {
     cntx->SendError("reached lua stack limit");
@@ -2311,6 +2311,8 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
       ++cmd_cnt;
     }
   });
+
+  SinkReplyBuilder::ReplyAggregator aggregate(cntx->reply_builder());
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   auto serialize_command = [&rb](string_view name, const CommandId& cid) {

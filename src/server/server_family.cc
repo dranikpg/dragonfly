@@ -2377,6 +2377,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
   }
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->SendVerbatimString(info);
 }

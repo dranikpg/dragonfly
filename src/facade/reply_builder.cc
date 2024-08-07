@@ -190,10 +190,6 @@ void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
 }
 
-constexpr static const char START_SYMBOLS[4][1] = {{'*'}, {'~'}, {'%'}, {'>'}};
-static_assert(START_SYMBOLS[RedisReplyBuilder2Base::MAP][0] == '%' &&
-              START_SYMBOLS[RedisReplyBuilder2Base::SET][0] == '~');
-
 void ReqSerializer::SendCommand(std::string_view str) {
   VLOG(2) << "SendCommand: " << str;
 
@@ -220,6 +216,7 @@ void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
 void RedisReplyBuilder2Base::SendLong(long val) {
   ReplyScope scope(this);
   WriteIntWithPrefix(':', val);
+  Write(kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendDouble(double val) {
@@ -242,6 +239,10 @@ void RedisReplyBuilder2Base::SendNullArray() {
   Write("*-1", kCRLF);
 }
 
+constexpr static const char START_SYMBOLS[4][1] = {{'*'}, {'~'}, {'%'}, {'>'}};
+static_assert(START_SYMBOLS[RedisReplyBuilder2Base::MAP][0] == '%' &&
+              START_SYMBOLS[RedisReplyBuilder2Base::SET][0] == '~');
+
 void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
   ReplyScope scope(this);
   if (!IsResp3()) {  // RESP2 supports only arrays
@@ -249,7 +250,8 @@ void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
       len *= 2;
     ct = ARRAY;
   }
-  WritePiece(absl::StrCat(START_SYMBOLS[ct], len, kCRLF));
+  string_view prefix{START_SYMBOLS[ct], 1};
+  WritePiece(absl::StrCat(prefix, len, kCRLF));
 }
 
 void RedisReplyBuilder2Base::WriteIntWithPrefix(char prefix, int64_t val) {
@@ -323,8 +325,25 @@ void RedisReplyBuilder::SendEmptyArray() {
   StartArray(0);
 }
 
+void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  SendBulkString(str);
+}
+
 char* RedisReplyBuilder::FormatDouble(double d, char* buf, unsigned len) {
   return buf;
 }
 
+SinkReplyBuilder::ReplyAggregator::~ReplyAggregator() {
+  if (!prev) {
+    rb->batched_ = false;
+    rb->Flush();
+  }
+}
+
+SinkReplyBuilder::ReplyScope::~ReplyScope() {
+  if (!prev) {
+    rb->scoped_ = false;
+    rb->FinishScope();
+  }
+}
 }  // namespace facade

@@ -35,12 +35,8 @@ class SinkReplyBuilder {
   struct ReplyScope {
     explicit ReplyScope(SinkReplyBuilder* rb) : prev(std::exchange(rb->scoped_, true)), rb(rb) {
     }
-    ~ReplyScope() {
-      if (!prev) {
-        rb->scoped_ = false;
-        rb->FinishScope();
-      }
-    }
+
+    ~ReplyScope();
 
    private:
     bool prev;
@@ -49,14 +45,10 @@ class SinkReplyBuilder {
 
   struct ReplyAggregator {
     explicit ReplyAggregator(SinkReplyBuilder* rb)
-        : prev(std::exchange(rb->scoped_, true)), rb(rb) {
+        : prev(std::exchange(rb->batched_, true)), rb(rb) {
     }
-    ~ReplyAggregator() {
-      if (!prev) {
-        rb->batched_ = false;
-        rb->FinishScope();
-      }
-    }
+
+    ~ReplyAggregator();
 
    private:
     bool prev;
@@ -186,9 +178,6 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder {
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
-  void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) {
-  }
-
   bool IsResp3() const {
     return resp3_;
   }
@@ -218,6 +207,8 @@ class RedisReplyBuilder : public RedisReplyBuilder2Base {
 
   void StartArray(unsigned len);
   void SendEmptyArray();
+
+  void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
 
   static char* FormatDouble(double d, char* buf, unsigned len);
 };
