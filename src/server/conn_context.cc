@@ -7,6 +7,7 @@
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
+#include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"

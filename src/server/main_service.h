@@ -8,6 +8,7 @@
 
 #include "base/varz_value.h"
 #include "core/interpreter.h"
+#include "facade/reply_capture.h"
 #include "facade/service_interface.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"

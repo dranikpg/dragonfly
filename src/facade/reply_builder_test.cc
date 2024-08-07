@@ -443,7 +443,7 @@ TEST_F(RedisReplyBuilderTest, SendStringViewArr) {
   const std::vector<std::string_view> kArrayMessage{
       // random values
       "(((", "}}}", "&&&&", "####", "___", "+++", "0.1234", "bar"};
-  builder_->SendStringArr(kArrayMessage);
+  builder_->SendBulkStrArr(kArrayMessage);
   ASSERT_TRUE(NoErrors());
   // verify content
   std::vector<std::string_view> message_tokens = TokenizeMessage();
@@ -474,7 +474,7 @@ TEST_F(RedisReplyBuilderTest, SendBulkStringArr) {
   const std::vector<std::string> kArrayMessage{
       // Test this one with large values
       std::string(1024, '.'), std::string(2048, ','), std::string(4096, ' ')};
-  builder_->SendStringArr(kArrayMessage);
+  builder_->SendBulkStrArr(kArrayMessage);
   ASSERT_TRUE(NoErrors());
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   // the form of this is *<array size>\r\n$<string1 size>\r\n<string1>..$<stringN
@@ -731,36 +731,36 @@ TEST_F(RedisReplyBuilderTest, Resp3NullString) {
   ASSERT_EQ(TakePayload(), "_\r\n");
 }
 
-TEST_F(RedisReplyBuilderTest, SendStringArrayAsMap) {
+TEST_F(RedisReplyBuilderTest, SendBulkStrArrayAsMap) {
   const std::vector<std::string> map_array{"k1", "v1", "k2", "v2"};
 
   builder_->SetResp3(false);
-  builder_->SendStringArr(map_array, builder_->MAP);
+  builder_->SendBulkStrArr(map_array, builder_->MAP);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*4\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
-      << "SendStringArrayAsMap Resp2 Failed.";
+      << "SendBulkStrArrayAsMap Resp2 Failed.";
 
   builder_->SetResp3(true);
-  builder_->SendStringArr(map_array, builder_->MAP);
+  builder_->SendBulkStrArr(map_array, builder_->MAP);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "%2\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
-      << "SendStringArrayAsMap Resp3 Failed.";
+      << "SendBulkStrArrayAsMap Resp3 Failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
+TEST_F(RedisReplyBuilderTest, SendBulkStrArrayAsSet) {
   const std::vector<std::string> set_array{"e1", "e2", "e3"};
 
   builder_->SetResp3(false);
-  builder_->SendStringArr(set_array, builder_->SET);
+  builder_->SendBulkStrArr(set_array, builder_->SET);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
-      << "SendStringArrayAsSet Resp2 Failed.";
+      << "SendBulkStrArrayAsSet Resp2 Failed.";
 
   builder_->SetResp3(true);
-  builder_->SendStringArr(set_array, builder_->SET);
+  builder_->SendBulkStrArr(set_array, builder_->SET);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "~3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
-      << "SendStringArrayAsSet Resp3 Failed.";
+      << "SendBulkStrArrayAsSet Resp3 Failed.";
 }
 
 TEST_F(RedisReplyBuilderTest, SendScoredArray) {
@@ -878,9 +878,9 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
       [](RRB* r) { r->SendNullArray(); },
       [](RRB* r) { r->SendError("e1", "e2"); },
       [kTestSws](RRB* r) { r->SendSimpleStrArr(kTestSws); },
-      [kTestSws](RRB* r) { r->SendStringArr(kTestSws); },
-      [kTestSws](RRB* r) { r->SendStringArr(kTestSws, RRB::SET); },
-      [kTestSws](RRB* r) { r->SendStringArr(kTestSws, RRB::MAP); },
+      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws); },
+      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, RRB::SET); },
+      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, RRB::MAP); },
       [kTestSws](RRB* r) {
         r->StartArray(3);
         r->SendLong(1L);

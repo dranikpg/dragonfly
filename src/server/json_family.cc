@@ -1975,7 +1975,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       if (it.empty()) {
         rb->SendNullArray();
       } else {
-        rb->SendStringArr(it);
+        rb->SendBulkStrArr(it);
       }
     }
   } else {
@@ -2100,7 +2100,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
       // When vector is empty, the path doesn't exist in the corresponding json.
       rb->SendNull();
     } else {
-      rb->SendStringArr(*result);
+      rb->SendBulkStrArr(*result);
     }
   } else {
     if (result.status() == OpStatus::KEY_NOTFOUND) {

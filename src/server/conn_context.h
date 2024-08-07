@@ -10,10 +10,13 @@
 #include "acl/acl_commands_def.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
-#include "facade/reply_capture.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"
+
+namespace facade {
+class CapturingReplyBuilder;
+}
 
 namespace dfly {
 

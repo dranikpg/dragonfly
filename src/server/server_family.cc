@@ -1445,7 +1445,8 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   absl::StrAppend(&info, "END\r\n");
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
-  builder->SendRaw(info);
+  // builder->SendRaw(info);
+  //  TODO(now)
 
 #undef ADD_LINE
 }
@@ -1769,7 +1770,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendStringArr(res, RedisReplyBuilder::MAP);
+    return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
   }
 
   if (sub_cmd == "RESETSTAT") {
@@ -1887,7 +1888,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), this, ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        SinkReplyBuilder::ResetThreadLocalStats();
+        // TODO(now)
+        // SinkReplyBuilder::ResetThreadLocalStats();
         auto& stats = tl_facade_stats->conn_stats;
         stats.command_cnt = 0;
         stats.pipelined_cmd_cnt = 0;
