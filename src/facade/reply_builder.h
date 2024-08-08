@@ -21,8 +21,14 @@ enum class ReplyMode {
   FULL       // All replies are recorded
 };
 
-// TMP: New version of reply builder that batches not only to a buffer, but also iovecs.
+// Base class for all reply builders. Offer a simple high level interface for controlling output
+// modes and sending basic response types.
 class SinkReplyBuilder {
+  struct GuardBase {
+    bool prev;
+    SinkReplyBuilder* rb;
+  };
+
  public:
   constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
@@ -32,27 +38,21 @@ class SinkReplyBuilder {
 
   // Use with care: All send calls within a scope must keep their data alive!
   // This allows to fully eliminate copies for batches of data by using vectorized io.
-  struct ReplyScope {
-    explicit ReplyScope(SinkReplyBuilder* rb) : prev(std::exchange(rb->scoped_, true)), rb(rb) {
+  struct ReplyScope : GuardBase {
+    explicit ReplyScope(SinkReplyBuilder* rb) : GuardBase{std::exchange(rb->scoped_, true), rb} {
     }
 
     ~ReplyScope();
-
-   private:
-    bool prev;
-    SinkReplyBuilder* rb;
   };
 
-  struct ReplyAggregator {
+  // Reduce number of send calls by aggregating responses in a buffer. Prefer ReplyScope
+  // if it's conditions are met.
+  struct ReplyAggregator : GuardBase {
     explicit ReplyAggregator(SinkReplyBuilder* rb)
-        : prev(std::exchange(rb->batched_, true)), rb(rb) {
+        : GuardBase{std::exchange(rb->batched_, true), rb} {
     }
 
     ~ReplyAggregator();
-
-   private:
-    bool prev;
-    SinkReplyBuilder* rb;
   };
 
   std::error_code GetError() const {
@@ -60,15 +60,19 @@ class SinkReplyBuilder {
   }
 
   size_t UsedMemory() const {
-    return 0;
+    return buffer_.Capacity();
   }
 
   bool IsSendActive() {
     return false;
   }
+
   void SetBatchMode(bool b) {
+    batched_ = b;
   }
+
   void FlushBatch() {
+    Flush();
   }
 
   void CloseConnection() {
@@ -77,7 +81,7 @@ class SinkReplyBuilder {
   void ExpectReply() {
   }
 
- public:  // interface
+ public:  // High level interface
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
 
@@ -98,7 +102,7 @@ class SinkReplyBuilder {
   }
 
   template <size_t S> void WriteI(const char (&arr)[S]) {
-    WritePiece(arr);
+    WritePiece(std::string_view{arr, S - 1});
   }
 
   template <typename... Args> void Write(Args&&... strs) {
@@ -113,8 +117,6 @@ class SinkReplyBuilder {
   void WritePiece(std::string_view str);  // Reserve + memcpy + Commit
 
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
-
-  bool IsInBuf(const void* ptr) const;
   void NextVec(std::string_view str);
 
  private:
@@ -126,6 +128,7 @@ class SinkReplyBuilder {
   size_t total_size_ = 0;  // sum of vec_ lengths
   base::IoBuf buffer_;
   std::vector<iovec> vecs_;
+  std::vector<unsigned> ext_indices_;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

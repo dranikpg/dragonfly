@@ -31,15 +31,13 @@ inline iovec constexpr IoVec(std::string_view s) {
 constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
+constexpr char kNullStringR2[] = "$-1\r\n";
+constexpr char kNullStringR3[] = "_\r\n";
 
 constexpr unsigned kConvFlags =
     DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
 
 DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
-
-const char* NullString(bool resp3) {
-  return resp3 ? "_\r\n" : "$-1\r\n";
-}
 
 }  // namespace
 
@@ -48,15 +46,13 @@ char* SinkReplyBuilder::ReservePiece(size_t size) {
     Flush();
 
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
-  if (vecs_.empty() || !IsInBuf(vecs_.back().iov_base))
+  if (vecs_.empty() || (((char*)vecs_.back().iov_base) + vecs_.back().iov_len) != dest)
     NextVec({dest, 0});
 
   return dest;
 }
 
 void SinkReplyBuilder::CommitPiece(size_t size) {
-  DCHECK(IsInBuf(vecs_.back().iov_base));
-
   buffer_.CommitWrite(size);
   vecs_.back().iov_len += size;
   total_size_ += size;
@@ -70,10 +66,16 @@ void SinkReplyBuilder::WritePiece(std::string_view str) {
 
 void SinkReplyBuilder::WriteRef(std::string_view str) {
   NextVec(str);
+  ext_indices_.push_back(vecs_.size() - 1);
   total_size_ += str.size();
 }
 
 void SinkReplyBuilder::Flush() {
+  // string out;
+  // for (iovec v : vecs_)
+  //   absl::StrAppend(&out, "{", string_view{(char*)v.iov_base, v.iov_len}, "}");
+  // VLOG(0) << out;
+
   auto ec = sink_->Write(vecs_.data(), vecs_.size());
   if (ec)
     ec_ = ec;
@@ -82,6 +84,7 @@ void SinkReplyBuilder::Flush() {
 
   buffer_.Clear();
   vecs_.clear();
+  ext_indices_.clear();
   total_size_ = 0;
 
   if (buffer_bytes * 2 > buffer_.Capacity())
@@ -97,24 +100,18 @@ void SinkReplyBuilder::FinishScope() {
     return Flush();
 
   // Copy all extenral references to buffer to safely keep batching
-  for (iovec& vec : vecs_) {
-    if (IsInBuf(vec.iov_base))
-      continue;
-
+  for (unsigned i : ext_indices_) {
+    iovec& vec = vecs_[i];
     void* dest = buffer_.AppendBuffer().data();
     memcpy(dest, vec.iov_base, vec.iov_len);
     buffer_.CommitWrite(vec.iov_len);
     vec.iov_base = dest;
   }
-}
-
-bool SinkReplyBuilder::IsInBuf(const void* ptr) const {
-  auto ib = buffer_.InputBuffer();
-  return ptr >= ib.data() && ptr <= ib.data() + ib.size();
+  ext_indices_.clear();
 }
 
 void SinkReplyBuilder::NextVec(std::string_view str) {
-  if (vecs_.size() >= IOV_MAX)
+  if (vecs_.size() >= IOV_MAX - 2)
     Flush();
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
@@ -199,7 +196,7 @@ void ReqSerializer::SendCommand(std::string_view str) {
 
 void RedisReplyBuilder2Base::SendNull() {
   ReplyScope scope(this);
-  Write(NullString(IsResp3()));
+  resp3_ ? Write(kNullStringR3) : Write(kNullStringR2);
 }
 
 void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
