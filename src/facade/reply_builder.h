@@ -3,9 +3,8 @@
 //
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
 
-#include <optional>
 #include <string_view>
 
 #include "facade/facade_types.h"
@@ -75,11 +74,16 @@ class SinkReplyBuilder {
     Flush();
   }
 
-  void CloseConnection() {
-  }
+  void CloseConnection();
 
   void ExpectReply() {
   }
+
+  static const ReplyStats& GetThreadLocalStats() {
+    return tl_facade_stats->reply_stats;
+  }
+
+  static void ResetThreadLocalStats();
 
  public:  // High level interface
   virtual void SendLong(long val) = 0;
@@ -97,12 +101,15 @@ class SinkReplyBuilder {
   virtual void SendProtocolError(std::string_view str) = 0;
 
  protected:
+  // Write strings beyond the inline size as refs. Once the scope ends, they're flushed
+  // or converted into pieces if batching is enabled and the buffer is not filled up enough.
   void WriteI(std::string_view str) {
     str.size() > kMaxInlineSize ? WriteRef(str) : WritePiece(str);
   }
 
+  // Constexpr arrays are assumed to be protocol control sequences, stash them as pieces
   template <size_t S> void WriteI(const char (&arr)[S]) {
-    WritePiece(std::string_view{arr, S - 1});
+    WritePiece(std::string_view{arr, S - 1});  // we assume null termination
   }
 
   template <typename... Args> void Write(Args&&... strs) {
@@ -125,17 +132,17 @@ class SinkReplyBuilder {
 
   bool scoped_ = false, batched_ = false;
 
-  size_t total_size_ = 0;  // sum of vec_ lengths
-  base::IoBuf buffer_;
-  std::vector<iovec> vecs_;
-  std::vector<unsigned> ext_indices_;
+  size_t total_size_ = 0;                          // sum of vec_ lengths
+  base::IoBuf buffer_;                             // backing buffer for pieces
+  absl::InlinedVector<iovec, 16> vecs_;            // vectors for writev
+  absl::InlinedVector<unsigned, 16> ref_indices_;  // indices of ref vectors
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
   bool noreply_;
 
  public:
-  explicit MCReplyBuilder(::io::Sink* stream);
+  explicit MCReplyBuilder(::io::Sink* sink);
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
@@ -181,6 +188,8 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder {
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
+  static char* FormatDouble(double d, char* dest, unsigned len);
+
   bool IsResp3() const {
     return resp3_;
   }
@@ -202,7 +211,7 @@ class RedisReplyBuilder : public RedisReplyBuilder2Base {
   }
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
-  void SendBulkStrArr(const facade::ArgRange& strs, CollectionType type = ARRAY);
+  void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
   void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
 
   void SendStored() final;
@@ -212,24 +221,7 @@ class RedisReplyBuilder : public RedisReplyBuilder2Base {
   void SendEmptyArray();
 
   void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
-
-  static char* FormatDouble(double d, char* buf, unsigned len);
-};
-
-class ReqSerializer {
- public:
-  explicit ReqSerializer(::io::Sink* stream) : sink_(stream) {
-  }
-
-  void SendCommand(std::string_view str);
-
-  std::error_code ec() const {
-    return ec_;
-  }
-
- private:
-  ::io::Sink* sink_;
-  std::error_code ec_;
+  static std::string SerializeCommmand(std::string_view cmd);
 };
 
 }  // namespace facade
