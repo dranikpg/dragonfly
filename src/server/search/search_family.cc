@@ -1244,27 +1244,39 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
-  // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  atomic<bool> index_not_found{false};
-  vector<SearchResult> docs(shard_set->size());
-
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
-    else
-      index_not_found.store(true, memory_order_relaxed);
-    return OpStatus::OK;
-  });
-
-  if (index_not_found.load())
-    return builder->SendError(string{index_name} + ": no such index");
-
-  for (const auto& res : docs) {
-    if (res.error)
-      return builder->SendError(*res.error);
+  SearchResultV2 res;
+  DocIndex base_index;
+  {
+    auto [lk, idx] = EngineShard::tlocal()->search_indices()->BorrowIndex(index_name);
+    res = idx->SearchV2(*params, &search_algo);
+    base_index = idx->GetInfo().base_index;
   }
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+  vector<SerializedSearchDoc> out;
+  out.reserve(res.keys.size());
+  for (std::string& key : res.keys) {
+    out.push_back(SerializedSearchDoc{.key = std::move(key)});
+  }
+
+  if (!params->IdsOnly()) {
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      ShardDocIndex::SerializeV2(t->GetOpArgs(es), absl::MakeSpan(out), base_index);
+      return OpStatus::OK;
+    });
+  }
+
+  // TODO: Sort by non-sortable if needed
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  size_t mtp = params->IdsOnly() ? 1 : 2;
+  RedisReplyBuilder::ArrayScope scope{rb, mtp * out.size() + 1};
+  rb->SendLong(res.total_hits);
+  for (const auto& doc : out) {
+    if (params->IdsOnly())
+      rb->SendBulkString(doc.key);
+    else
+      SendSerializedDoc(doc, rb);
+  }
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {

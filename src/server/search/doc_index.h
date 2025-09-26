@@ -57,6 +57,12 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
+struct SearchResultV2 {
+  size_t total_hits;
+  std::vector<std::string> keys;
+  std::optional<facade::ErrorReply> error;
+};
+
 // Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
 struct FieldReference {
   explicit FieldReference(std::string_view name, std::string_view alias = "")
@@ -235,6 +241,11 @@ class ShardDocIndex {
   // Index must be rebuilt at least once after intialization
   ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
+  SearchResultV2 SearchV2(const SearchParams& params, search::SearchAlgorithm* search_algo) const;
+
+  static void SerializeV2(const OpArgs& op_args, absl::Span<SerializedSearchDoc> docs,
+                          const DocIndex&);
+
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo) const;
@@ -304,6 +315,9 @@ class ShardDocIndices {
   // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
 
+  std::pair<std::shared_lock<util::fb2::SharedMutex>, ShardDocIndex*> BorrowIndex(
+      std::string_view name);
+
   // Init index: create shard local state for given index with given name.
   // Build if instance is in active state.
   void InitIndex(const OpArgs& op_args, std::string_view name,
@@ -332,7 +346,6 @@ class ShardDocIndices {
 
  private:
   MiMemoryResource local_mr_;
-  absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
 }  // namespace dfly
