@@ -1244,6 +1244,25 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
 
+  auto* index = EngineShard::tlocal()->search_indices()->GetIndex(index_name);
+  auto res = index->SearchV2(*params, &search_algo);
+  
+  vector<SerializedSearchDoc> out;
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto sub_out = index->SerializeV2(t->GetOpArgs(es), res.keys);
+    out.insert(out.begin(), sub_out.begin(), sub_out.end());
+    return OpStatus::OK;
+  });
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  RedisReplyBuilder::ArrayScope scope{rb, 2 * out.size() + 1};
+  rb->SendLong(res.total_hits);
+  for (auto doc: out) {
+    SendSerializedDoc(doc, rb);
+  }
+
+  /*
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
@@ -1265,6 +1284,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+  */
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {

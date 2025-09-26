@@ -112,6 +112,9 @@ std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
   return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
+
+absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> kIndices;
+
 }  // namespace
 
 bool FieldReference::IsJsonPath(std::string_view name) {
@@ -478,6 +481,41 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
 }
 
+SearchResultV2 ShardDocIndex::SearchV2(const SearchParams& params, search::SearchAlgorithm* search_algo) const {
+  size_t limit = params.limit_offset + params.limit_total;
+  auto result = search_algo->Search(&*indices_);
+  if (!result.error.empty())
+    return {.error = facade::ErrorReply(std::move(result.error))};
+  
+  vector<string> keys;
+  for (auto id: result.ids) {
+    keys.emplace_back(string{key_index_.Get(id)});
+  }
+
+  return {.total_hits = result.total, .keys = std::move(keys), .error = nullopt};
+}
+
+std::vector<SerializedSearchDoc> ShardDocIndex::SerializeV2(const OpArgs& op_args, 
+                            absl::Span<const std::string> keys) const {
+  auto sid = EngineShard::tlocal()->shard_id();
+
+  vector<SerializedSearchDoc> out;
+  for (string_view key: keys) {
+    if (Shard(key, shard_set->size()) != sid)
+      continue;
+
+    auto& db_slice = op_args.GetDbSlice();
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+    if (!it || !IsValid(*it))
+      continue;
+
+    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    SearchDocData fields = accessor->Serialize(base_->schema);
+    out.push_back(SerializedSearchDoc{.key = std::string{key}, .values = std::move(fields)});
+  }
+  return out;
+}
+
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
@@ -623,14 +661,14 @@ ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap(
 }
 
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
-  auto it = indices_.find(name);
-  return it != indices_.end() ? it->second.get() : nullptr;
+  auto it = kIndices.find(name);
+  return it != kIndices.end() ? it->second.get() : nullptr;
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<const DocIndex> index_ptr) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
-  auto [it, _] = indices_.emplace(name, std::move(shard_index));
+  auto [it, _] = kIndices.emplace(name, std::move(shard_index));
 
   // Don't build while loading, shutting down, etc.
   // After loading, indices are rebuilt separately
@@ -644,21 +682,21 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
 }
 
 bool ShardDocIndices::DropIndex(string_view name) {
-  auto it = indices_.find(name);
-  if (it == indices_.end())
+  auto it = kIndices.find(name);
+  if (it == kIndices.end())
     return false;
 
   DropIndexCache(*it->second);
-  indices_.erase(it);
+  kIndices.erase(it);
 
   return true;
 }
 
 void ShardDocIndices::DropAllIndices() {
-  for (auto it = indices_.begin(); it != indices_.end(); it++) {
+  for (auto it = kIndices.begin(); it != kIndices.end(); it++) {
     DropIndexCache(*it->second);
   }
-  indices_.clear();
+  kIndices.clear();
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
@@ -668,21 +706,21 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 }
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
-  for (auto& [_, ptr] : indices_)
+  for (auto& [_, ptr] : kIndices)
     ptr->Rebuild(op_args, &local_mr_);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
   vector<string> names{};
-  names.reserve(indices_.size());
-  for (const auto& [name, ptr] : indices_)
+  names.reserve(kIndices.size());
+  for (const auto& [name, ptr] : kIndices)
     names.push_back(name);
   return names;
 }
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
+  for (auto& [_, index] : kIndices) {
     if (index->Matches(key, pv.ObjType()))
       index->AddDoc(key, db_cntx, pv);
   }
@@ -690,7 +728,7 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const Pr
 
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
+  for (auto& [_, index] : kIndices) {
     if (index->Matches(key, pv.ObjType()))
       index->RemoveDoc(key, db_cntx, pv);
   }
@@ -702,10 +740,10 @@ size_t ShardDocIndices::GetUsedMemory() const {
 
 SearchStats ShardDocIndices::GetStats() const {
   size_t total_entries = 0;
-  for (const auto& [_, index] : indices_)
+  for (const auto& [_, index] : kIndices)
     total_entries += index->GetInfo().num_docs;
 
-  return {GetUsedMemory(), indices_.size(), total_entries};
+  return {GetUsedMemory(), kIndices.size(), total_entries};
 }
 
 }  // namespace dfly

@@ -57,6 +57,12 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
+struct SearchResultV2 {
+  size_t total_hits;
+  std::vector<std::string> keys;
+  std::optional<facade::ErrorReply> error;
+};
+
 // Field reference with optional alias as parsed from RETURN [field AS alias], LOAD, etc...
 struct FieldReference {
   explicit FieldReference(std::string_view name, std::string_view alias = "")
@@ -235,6 +241,12 @@ class ShardDocIndex {
   // Index must be rebuilt at least once after intialization
   ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
+  SearchResultV2 SearchV2(const SearchParams& params, 
+                      search::SearchAlgorithm* search_algo) const;
+  
+  std::vector<SerializedSearchDoc> SerializeV2(const OpArgs& op_args, 
+                            absl::Span<const std::string>) const;
+
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo) const;
@@ -332,7 +344,6 @@ class ShardDocIndices {
 
  private:
   MiMemoryResource local_mr_;
-  absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
 }  // namespace dfly
