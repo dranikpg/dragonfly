@@ -32,6 +32,10 @@ class SdsPair {
     return this;
   }
 
+  operator std::pair<std::string_view, std::string_view>() {
+    return {{first, sdslen(first)}, {second, sdslen(second)}};
+  }
+
   const sds first;
   const sds second;
 };
@@ -49,6 +53,12 @@ class StringMap : public DenseSet {
     static detail::SdsPair BreakToPair(void* obj);
 
    public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type = std::ptrdiff_t;
+    using value_type = detail::SdsPair;
+    using pointer = detail::SdsPair*;
+    using reference = detail::SdsPair&;
+
     iterator() : IteratorBase() {
     }
 
@@ -116,6 +126,8 @@ class StringMap : public DenseSet {
   bool Erase(std::string_view s1);
 
   bool Contains(std::string_view s1) const;
+
+  using const_iterator = iterator;
 
   /// @brief  Returns value of the key or an empty iterator if key not found.
   /// @param key

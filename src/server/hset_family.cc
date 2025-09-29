@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "core/detail/listpack_wrapper.h"
 #include "core/string_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -115,17 +116,6 @@ size_t EstimateListpackMinBytes(CmdArgList members) {
     bytes += (member.size() + 1);  // string + at least 1 byte for string header.
   }
   return bytes;
-}
-
-size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
-  void* ptr = co.RObjPtr();
-  if (co.Encoding() == kEncodingStrMap2) {
-    StringMap* sm = GetStringMap(co, db_cntx);
-    return sm->UpperBoundSize();
-  }
-
-  DCHECK_EQ(kEncodingListPack, co.Encoding());
-  return lpLength((uint8_t*)ptr) / 2;
 }
 
 OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
@@ -298,25 +288,6 @@ std::pair<OpResult<DbSlice::ConstIterator>, KeyCleanup> FindReadOnly(DbSlice& db
                    KeyCleanup{[&](const auto& k) { DeleteKey(db_slice, op_args, k); }, key}};
 }
 
-// The find and contains functions perform the usual search on string maps, with the added argument
-// KeyCleanup. This object is armed if the string map becomes empty during search due to keys being
-// expired. An armed object on destruction removes the key which has just become empty.
-StringMap::iterator Find(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
-  auto it = sm->Find(field);
-  if (sm->Empty()) {
-    defer_cleanup.arm();
-  }
-  return it;
-}
-
-bool Contains(StringMap* sm, const std::string_view field, KeyCleanup& defer_cleanup) {
-  auto result = sm->Contains(field);
-  if (sm->Empty()) {
-    defer_cleanup.arm();
-  }
-  return result;
-}
-
 OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
   constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
@@ -465,46 +436,27 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 
   std::vector<OptStr> result(fields.size());
 
+  HMapWrapper hw{pv, op_args.db_cntx};
   if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-
     absl::flat_hash_map<string_view, absl::InlinedVector<size_t, 3>> reverse;
     reverse.reserve(fields.size() + 1);
-    for (size_t i = 0; i < fields.size(); ++i) {
-      reverse[ArgS(fields, i)].push_back(i);  // map fields to their index.
-    }
+    for (size_t i = 0; i < fields.size(); ++i)
+      reverse[fields[i]].push_back(i);
 
-    size_t lplen = lpLength(lp);
-    DCHECK(lplen > 0 && lplen % 2 == 0);
-
-    uint8_t ibuf[32];
-    string_view key;
-
-    uint8_t* lp_elem = lpFirst(lp);
-    DCHECK(lp_elem);  // empty containers are not allowed.
-
-    // We do single pass on listpack for this operation.
-    do {
-      key = LpGetView(lp_elem, ibuf);
-      lp_elem = lpNext(lp, lp_elem);  // switch to value
-      DCHECK(lp_elem);
-
-      auto it = reverse.find(key);
-      if (it != reverse.end()) {
+    for (const auto [key, value] : hw.Range()) {
+      if (auto it = reverse.find(key); it != reverse.end()) {
         for (size_t index : it->second) {
           DCHECK_LT(index, result.size());
-          result[index].emplace(LpGetView(lp_elem, ibuf));  // populate found items.
+          result[index].emplace(value);  // populate found items.
         }
       }
-
-      lp_elem = lpNext(lp, lp_elem);  // switch to the next key
-    } while (lp_elem);
+    }
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      if (auto it = Find(sm, ToSV(fields[i]), defer_cleanup); it != sm->end()) {
+      if (auto it = sm->Find(fields[i]); it != sm->end()) {
         result[i].emplace(it->second, sdslen(it->second));
       }
     }
@@ -516,120 +468,41 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  if (it_res) {
-    return HMapLength(op_args.db_cntx, (*it_res)->second);
-  }
-
-  if (it_res.status() == OpStatus::KEY_NOTFOUND)
-    return 0;
-  return it_res.status();
+  return HMapWrapper{(*it_res)->second, op_args.db_cntx}.Length();
 }
 
 OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return 0;
-    return it_res.status();
-  }
-
-  const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-    return res.has_value();
-  }
-
-  DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  return Contains(sm, field, defer_cleanup) ? 1 : 0;
+  return HMapWrapper{(*it_res)->second, op_args.db_cntx}.Find(key).has_value();
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  if (!it_res)
-    return it_res.status();
-
-  const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
-
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-    if (!res) {
-      return OpStatus::KEY_NOTFOUND;
-    }
-    return string(*res);
-  }
-
-  DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  if (const auto it = Find(sm, field, defer_cleanup); it != sm->end()) {
-    return string(it->second, sdslen(it->second));
-  }
-
-  return OpStatus::KEY_NOTFOUND;
+  HMapWrapper hw{(*it_res)->second, op_args.db_cntx};
+  auto it = hw.Find(key);
+  return it ? OpResult<string>{string{it->second}} : OpResult<string>{OpStatus::KEY_NOTFOUND};
 }
 
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return vector<string>{};
-    return it_res.status();
-  }
-
-  const PrimeValue& pv = (*it_res)->second;
+  RETURN_ON_BAD_STATUS(it_res);
 
   vector<string> res;
-  bool keyval = (mask == (FIELDS | VALUES));
-
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    res.resize(lpLength(lp) / (keyval ? 1 : 2));
-
-    uint8_t* fptr = lpFirst(lp);
-    uint8_t intbuf[LP_INTBUF_SIZE];
-
-    unsigned index = 0;
-    while (fptr) {
-      if (mask & FIELDS) {
-        res[index++] = LpGetView(fptr, intbuf);
-      }
-      fptr = lpNext(lp, fptr);
-      if (mask & VALUES) {
-        res[index++] = LpGetView(fptr, intbuf);
-      }
-      fptr = lpNext(lp, fptr);
-    }
-  } else {
-    DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-    res.reserve(sm->UpperBoundSize() * (keyval ? 2 : 1));
-    for (const auto& k_v : *sm) {
-      if (mask & FIELDS) {
-        res.emplace_back(k_v.first, sdslen(k_v.first));
-      }
-
-      if (mask & VALUES) {
-        res.emplace_back(k_v.second, sdslen(k_v.second));
-      }
-    }
-  }
-
-  // Empty hashmaps must be deleted, this case only triggers for expired values
-  // and the enconding is guaranteed to be a DenseSet since we only support expiring
-  // value with that enconding.
-  if (res.empty()) {
-    DeleteKey(db_slice, op_args, key);
+  HMapWrapper hw{(*it_res)->second, op_args.db_cntx};
+  for (const auto [key, value] : hw.Range()) {
+    if (mask & FIELDS)
+      res.emplace_back(key);
+    if (mask & VALUES)
+      res.emplace_back(value);
   }
 
   return res;
@@ -638,27 +511,11 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
 OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.GetDbSlice();
   auto [it_res, defer_cleanup] = FindReadOnly(db_slice, op_args, key);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  if (!it_res) {
-    if (it_res.status() == OpStatus::KEY_NOTFOUND)
-      return 0;
-    return it_res.status();
-  }
-
-  const PrimeValue& pv = (*it_res)->second;
-  void* ptr = pv.RObjPtr();
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t intbuf[LP_INTBUF_SIZE];
-    optional<string_view> res = LpFind((uint8_t*)ptr, field, intbuf);
-
-    return res ? res->size() : 0;
-  }
-
-  DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
-  auto it = Find(sm, field, defer_cleanup);
-  return it != sm->end() ? sdslen(it->second) : 0;
+  HMapWrapper hw{(*it_res)->second, op_args.db_cntx};
+  auto res = hw.Find(key);
+  return res ? res->second.size() : 0;
 }
 
 struct OpSetParams {
@@ -748,6 +605,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
 
   OpResult<vector<string>> result = tx->ScheduleSingleHopT(std::move(cb));
 
+  // TODO: key_notfound empty reply
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
     bool is_map = (getall_mask == (VALUES | FIELDS));
