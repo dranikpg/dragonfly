@@ -246,4 +246,16 @@ TEST_F(StringMapTest, ExpiryChangesSize) {
   EXPECT_EQ(new_size, sm_->ObjMallocUsed());
 }
 
+TEST_F(StringMapTest, TotalMem) {
+  size_t total_size = 0;
+  const string_view value = "valuevaluevalue";
+
+  for (int i = 0; i < 10; i++) {
+    string key = absl::StrCat("keykeykey", i);
+    sm_->AddOrUpdate(key, value);
+    total_size += key.size() + value.size();
+    VLOG(0) << sm_->ObjMallocUsed() << " / " << total_size;
+  }
+}
+
 }  // namespace dfly

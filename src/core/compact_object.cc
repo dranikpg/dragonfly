@@ -875,8 +875,11 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 CompactObjType CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == EXTERNAL_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
     return OBJ_STRING;
+
+  if (taglen_ == EXTERNAL_TAG)
+    return u_.ext_ptr.is_hash ? OBJ_HASH : OBJ_STRING;
 
   if (taglen_ == ROBJ_TAG)
     return u_.r_obj.type();
@@ -1193,9 +1196,11 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz) {
+  bool is_hash = ObjType() == OBJ_HASH;
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
+  u_.ext_ptr.is_hash = is_hash;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
@@ -1234,7 +1239,7 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   auto& ext = u_.ext_ptr;
   size_t offset = ext.page_offset;
   offset += size_t(ext.is_cool ? ext.cool_record->page_index : ext.offload.page_index) * 4096;
-  return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.serialized_size));
+  return {offset, size_t(u_.ext_ptr.serialized_size)};
 }
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {

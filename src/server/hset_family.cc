@@ -5,6 +5,7 @@
 #include "server/hset_family.h"
 
 #include "server/family_utils.h"
+#include "server/tiering/op_manager.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -23,6 +24,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/search/doc_index.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -591,7 +593,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   vector<string> res;
   bool keyval = (mask == (FIELDS | VALUES));
 
-  if (pv.Encoding() == kEncodingListPack) {
+  if (pv.Encoding() == kEncodingListPack && !pv.IsExternal()) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
     res.resize(lpLength(lp) / (keyval ? 1 : 2));
 
@@ -610,8 +612,19 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
       fptr = lpNext(lp, fptr);
     }
   } else {
-    DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+    StringMap* sm;
+    if (pv.IsExternal()) {
+      util::fb2::Future<StringMap*> fut;
+      op_args.shard->tiered_storage()->ReadRaw<tiering::StringMapDecoder>(
+          op_args.db_cntx.db_index, key, pv,
+          [fut](io::Result<tiering::StringMapDecoder*> res) mutable {
+            fut.Resolve((*res)->Clone());
+          });
+      sm = fut.Get();
+    } else {
+      DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
+      sm = GetStringMap(pv, op_args.db_cntx);
+    }
 
     res.reserve(sm->UpperBoundSize() * (keyval ? 2 : 1));
     for (const auto& k_v : *sm) {
@@ -682,7 +695,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   PrimeValue& pv = it->second;
 
   if (add_res.is_new) {
-    if (op_sp.ttl == UINT32_MAX) {
+    if (false) {
       lp = lpNew(0);
       pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
     } else {

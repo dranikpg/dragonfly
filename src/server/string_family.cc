@@ -34,6 +34,7 @@
 #include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
+#include "server/tiering/op_manager.h"
 #include "server/transaction.h"
 #include "util/fibers/future.h"
 
@@ -131,8 +132,11 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
     TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
+    auto cb = [fut](io::Result<string_view> s) mutable {
+      fut.Resolve(s.transform(&string_view::size));
+    };
+    op_args.shard->tiered_storage()->Read<tiering::StringDecoder, std::string_view>(
+        op_args.db_cntx.db_index, key, co, std::move(cb));
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -208,9 +212,9 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
 
   if (const PrimeValue& co = it_res.value()->second; co.IsExternal()) {
     fb2::Future<io::Result<std::string>> fut;
-    op_args.shard->tiered_storage()->Read(
+    op_args.shard->tiered_storage()->Read<tiering::StringDecoder, std::string_view>(
         op_args.db_cntx.db_index, key, co,
-        [read, fut](const io::Result<std::string>& s) mutable { fut.Resolve(string{read(*s)}); });
+        [read, fut](io::Result<std::string_view> s) mutable { fut.Resolve(string{read(*s)}); });
     return {std::move(fut)};
   } else {
     string tmp;
@@ -579,14 +583,15 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+      auto cb = [next, err, wait_bc](io::Result<string_view> v) mutable {
         if (v.has_value())
           memcpy(next, v->data(), v->size());
         else
           *err = v.error();
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
+      shard->tiered_storage()->Read<tiering::StringDecoder, std::string_view>(
+          t->GetDbIndex(), it.key(), value, std::move(cb));
     } else {
       value.GetString(next);
     }

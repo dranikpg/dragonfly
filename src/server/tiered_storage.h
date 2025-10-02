@@ -49,8 +49,9 @@ class TieredStorage {
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
   // Read offloaded value. It must be of external type
+  template <typename D, typename R = decltype(((D*)nullptr)->Read())>
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string>)> readf);
+            std::function<void(io::Result<R>)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
@@ -58,6 +59,10 @@ class TieredStorage {
   template <typename T>
   TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                     std::function<T(std::string*)> modf);
+
+  template <typename D>
+  void ReadRaw(DbIndex dbid, std::string_view key, const PrimeValue& pv,
+               std::function<void(io::Result<D*>)>);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   // Returns true if item was scheduled for stashing.

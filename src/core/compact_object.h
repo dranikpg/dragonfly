@@ -466,8 +466,9 @@ class CompactObj {
   struct ExternalPtr {
     uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
+    uint16_t is_hash : 1;
     uint16_t is_cool : 1;
-    uint16_t is_reserved : 15;
+    uint16_t is_reserved : 14;
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.

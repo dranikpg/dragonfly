@@ -17,6 +17,7 @@
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -73,6 +74,74 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
 }
 
+string EncodeHashMap(StringMap* map) {
+  std::string str;
+  str.resize(map->ObjMallocUsed() + 4 + map->UpperBoundSize() * 8);
+
+  char* ptr_start = str.data();
+  char* ptr = ptr_start + 4;
+
+  uint32_t written = 0;
+  for (const auto p : *map) {
+    absl::little_endian::Store32(ptr, sdslen(p.first));
+    ptr += 4;
+
+    memcpy(ptr, p.first, sdslen(p.first));
+    ptr += sdslen(p.first);
+
+    absl::little_endian::Store32(ptr, sdslen(p.second));
+    ptr += 4;
+
+    memcpy(ptr, p.second, sdslen(p.second));
+    ptr += sdslen(p.second);
+
+    written++;
+  }
+
+  absl::little_endian::Store32(ptr_start, written);
+  str.resize(ptr - ptr_start);
+  return str;
+}
+
+struct ValueEncoder {
+  size_t MemSize() const {
+    switch (pv.ObjType()) {
+      case OBJ_STRING:
+        return pv.Size();
+      case OBJ_HASH:
+        return static_cast<StringMap*>(pv.RObjPtr())->ObjMallocUsed();
+      default:
+        return 0;
+    };
+  }
+
+  size_t RequiredSize() const {
+    switch (pv.ObjType()) {
+      case OBJ_STRING:
+        return pv.Size();
+      case OBJ_HASH: {
+        auto* map = static_cast<StringMap*>(pv.RObjPtr());
+        return map->ObjMallocUsed() + 4 + map->UpperBoundSize() * 8;
+      }
+      default:
+        return 0;
+    };
+  }
+
+  StringOrView Encode() const {
+    switch (pv.ObjType()) {
+      case OBJ_STRING:
+        return pv.GetRawString();
+      case OBJ_HASH:
+        return StringOrView::FromString(EncodeHashMap(static_cast<StringMap*>(pv.RObjPtr())));
+      default:
+        return StringOrView{};
+    }
+  }
+
+  const PrimeValue& pv;
+};
+
 }  // anonymous namespace
 
 class TieredStorage::ShardOpManager : public tiering::OpManager {
@@ -123,8 +192,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  bool NotifyFetched(EntryId id, string_view value, tiering::DiskSegment segment,
-                     bool modified) override;
+  bool NotifyFetched(EntryId id, tiering::DiskSegment segment, tiering::Decoder&& decoder) override;
 
   bool NotifyDelete(tiering::DiskSegment segment) override;
 
@@ -210,23 +278,24 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   }
 }
 
-bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
-                                                  tiering::DiskSegment segment, bool modified) {
+bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegment segment,
+                                                  tiering::Decoder&& decoder) {
   ++stats_.total_fetches;
 
   if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
-    Defragment(segment, value);
+    // Defragment(segment, value);
     return true;  // delete
   }
 
   // 1. When modified is true we MUST upload the value back to memory.
-  // 2. On the other hand, if read is caused by snapshotting we do not want to fetch it.
+  // 2, When the value is read a second time and we have a posiitive budget, we upload it.
+  // 3. If the read is caused by snapshotting we do not want to fetch it.
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
-  bool should_upload = modified;
-  should_upload |=
-      (ts_->UploadBudget() > int64_t(value.length())) && !SliceSnapshot::IsSnaphotInProgress();
+  bool should_upload = decoder.modified;
+  should_upload |= (ts_->UploadBudget() > int64_t(decoder.EstimateMemoryUsage())) &&
+                   !SliceSnapshot::IsSnaphotInProgress();
 
   if (!should_upload)
     return false;
@@ -234,10 +303,9 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    if (modified || pv->WasTouched()) {
-      bool is_raw = !modified;
+    if (decoder.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
-      Upload(key.first, value, is_raw, segment.length, pv);
+      decoder.Upload(pv);
       return true;
     }
     pv->SetTouched(true);
@@ -266,7 +334,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
       (void)dummy;  // a hack to make cb non constexpr that confuses some old) compilers.
       return false;
     };
-    Enqueue(kFragmentedBin, bin.segment, std::move(cb));
+    // Enqueue(kFragmentedBin, bin.segment, std::move(cb));
   }
 
   return false;
@@ -316,23 +384,30 @@ void TieredStorage::Close() {
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
   util::fb2::Future<io::Result<string>> fut;
-  Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
+  Read<tiering::StringDecoder, std::string_view>(
+      dbid, key, value, [fut](io::Result<string_view> res) mutable {
+        fut.Resolve(res.transform([](string_view s) { return string{s}; }));
+      });
   return fut;
 }
 
+template <typename D, typename R>
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(io::Result<std::string>)> readf) {
+                         std::function<void(io::Result<R>)> readf) {
   DCHECK(value.IsExternal());
   DCHECK(!value.IsCool());
-  auto cb = [readf = std::move(readf), enc = value.GetStrEncoding()](auto res) mutable {
-    readf(res.transform([enc](tiering::OpManager::FetchedEntry entry) {
-      auto [ptr, raw] = entry;
-      return raw ? enc.Decode(*ptr).Take() : *ptr;  // TODO(vlad): optimize last value copy
-    }));
-    return false;
+
+  auto cb = [readf = std::move(readf)](io::Result<D*> res) mutable {
+    readf(res.transform([](D* d) { return d->Read(); }));
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), D{value}, std::move(cb));
 }
+
+template void TieredStorage::Read<tiering::StringDecoder>(
+    DbIndex, string_view, const PrimeValue&, std::function<void(io::Result<std::string_view>)>);
+
+template void TieredStorage::Read<tiering::StringMapDecoder>(
+    DbIndex, string_view, const PrimeValue&, std::function<void(io::Result<const StringMap*>)>);
 
 template <typename T>
 TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
@@ -341,23 +416,27 @@ TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view k
   DCHECK(value.IsExternal());
 
   util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf), enc = value.GetStrEncoding()](auto res) mutable {
-    if (!res.has_value()) {
-      future.Resolve(res.get_unexpected());
-      return false;
-    }
-
-    auto [raw_val, is_raw] = *res;
-    if (is_raw) {
-      raw_val->resize(enc.DecodedSize(*raw_val));
-      enc.Decode(*raw_val, raw_val->data());
-    }
-    future.Resolve(modf(raw_val));
-    return true;
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
+    future.Resolve(res.transform([](auto* d) { return d->Write(); })  // Access as write
+                       .transform(modf)                               // Perform modification
+    );
   };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
+                       std::move(cb));
   return future;
 }
+
+template <typename D>
+void TieredStorage::ReadRaw(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                            std::function<void(io::Result<D*>)> f) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), D{value}, std::move(f));
+}
+
+template void TieredStorage::ReadRaw<tiering::StringMapDecoder>(
+    DbIndex, std::string_view, const PrimeValue&,
+    std::function<void(io::Result<tiering::StringMapDecoder*>)>);
 
 // Instantiate for size_t only - used in string_family's OpExtend.
 template TieredStorage::TResult<size_t> TieredStorage::Modify(
@@ -378,8 +457,11 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
     return false;
   }
 
-  StringOrView raw_string = value->GetRawString();
+  ValueEncoder encoder{*value};
+  StringOrView raw_string = encoder.Encode();
   value->SetStashPending(true);
+
+  VLOG(0) << "Trying to stash " << raw_string;
 
   tiering::OpManager::EntryId id;
   error_code ec;
@@ -569,9 +651,13 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
-         pv.Size() >= config_.min_value_size &&
-         disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
+  if (pv.IsExternal() || pv.HasStashPending())
+    return false;
+
+  size_t size = ValueEncoder{pv}.MemSize();
+  VLOG(0) << "Mem size " << size;
+  return size >= config_.min_value_size &&
+         disk_stats.allocated_bytes + tiering::kPageSize + size < disk_stats.max_file_size;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
