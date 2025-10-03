@@ -29,7 +29,6 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
-#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 

@@ -980,9 +980,7 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
-  facade::CmdArgParser parser{args};
-
+void CmdSet(CmdArgParser parser, const CommandContext& cmnd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
@@ -1080,10 +1078,8 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSetExGeneric(CmdArgParser parser, const CommandContext& cmd_cntx) {
   string_view cmd_name = cmd_cntx.conn_cntx->cid->name();
-
-  CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
   auto* builder = cmd_cntx.rb;
@@ -1110,7 +1106,7 @@ void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx)
   builder->SendError(SetGeneric(sparams, key, value, cmd_cntx));
 }
 
-void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1130,7 +1126,7 @@ void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 }
 
-void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGet(CmdArgList args, facade::SinkReplyBuilder* rb, Transaction* tx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1139,10 +1135,10 @@ void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{rb}.Send(tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGetDel(CmdArgList args, facade::SinkReplyBuilder* rb, Transaction* tx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1155,10 +1151,10 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{rb}.Send(tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1171,16 +1167,15 @@ void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
 }
 
-void StringFamily::Append(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdAppend(CmdArgList args, const CommandContext& cmnd_cntx) {
   ExtendGeneric(args, false, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::Prepend(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdPrepend(CmdArgList args, const CommandContext& cmnd_cntx) {
   ExtendGeneric(args, true, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  CmdArgParser parser{args};
+void CmdGetEx(CmdArgParser parser, const CommandContext& cmnd_cntx) {
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
@@ -1247,12 +1242,12 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
   GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::Incr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncr(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   return IncrByGeneric(key, 1, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::IncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
@@ -1263,7 +1258,7 @@ void StringFamily::IncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   return IncrByGeneric(key, val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
@@ -1287,12 +1282,12 @@ void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx)
   rb->SendDouble(result.value());
 }
 
-void StringFamily::Decr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdDecr(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   return IncrByGeneric(key, -1, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdDecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
@@ -1329,7 +1324,7 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdMGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
@@ -1387,7 +1382,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 }
 
-void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdMSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   if (VLOG_IS_ON(2)) {
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
@@ -1414,7 +1409,7 @@ void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 }
 
-void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdMSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1451,15 +1446,14 @@ void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   cmnd_cntx.rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void StringFamily::StrLen(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdStrLen(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
   GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
-  CmdArgParser parser(args);
+void CmdGetRange(CmdArgParser parser, const CommandContext& cmnd_cntx) {
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.TakeError(); err) {
@@ -1473,8 +1467,7 @@ void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
-  CmdArgParser parser(args);
+void CmdSetRange(CmdArgParser parser, const CommandContext& cmnd_cntx) {
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
   auto* builder = cmnd_cntx.rb;
 
@@ -1509,7 +1502,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
@@ -1616,7 +1609,7 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
 
 // Implements the memcache GAT command. The expected input is
 // GAT <expiry-in-seconds> key [keys...]
-void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   auto* builder = cmnd_cntx.rb;
@@ -1669,39 +1662,39 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
   rb->SendGetEnd();
 }
 
-#define HFUNC(x) SetHandler(&StringFamily::x)
-
 void StringFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kMSetMask =
       CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
-      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
-      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
-      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
-      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Incr)
-      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Decr)
-      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrBy)
-      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
-      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
-      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
-      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(GetEx)
-      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
-      << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
-      << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
-      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
-      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
-      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
-      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-             ClThrottle)
-      << CI{"GAT", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.HFUNC(GAT);
+      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.Wrap(CmdSet)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.Wrap(CmdSetExGeneric)
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.Wrap(CmdSetExGeneric)
+      << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.Wrap(CmdSetNx)
+      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.Wrap(CmdAppend)
+      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.Wrap(CmdPrepend)
+      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1}.Wrap(CmdIncr)
+      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1}.Wrap(CmdDecr)
+      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1}.Wrap(CmdIncrBy)
+      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1}.Wrap(CmdIncrByFloat)
+      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1}.Wrap(CmdDecrBy)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.Wrap(CmdGet)
+      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1}.Wrap(CmdGetDel)
+      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.Wrap(
+             CmdGetEx)
+      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.Wrap(CmdGetSet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.Wrap(CmdMGet)
+      << CI{"MSET", kMSetMask, -3, 1, -1}.Wrap(CmdMSet)
+      << CI{"MSETNX", kMSetMask, -3, 1, -1}.Wrap(CmdMSetNx)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.Wrap(CmdStrLen)
+      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.Wrap(CmdGetRange)
+      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.Wrap(CmdGetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.Wrap(CmdSetRange)
+      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.Wrap(
+             CmdClThrottle)
+      << CI{"GAT", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.Wrap(
+             CmdGAT);
 }
 
 }  // namespace dfly

@@ -13,6 +13,8 @@
 #include <optional>
 
 #include "base/function2.hpp"
+#include "core/overloaded.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/command_id.h"
 
 namespace facade {
@@ -78,6 +80,25 @@ struct CommandContext {
   facade::SinkReplyBuilder* rb;
   ConnectionContext* conn_cntx;
 };
+
+namespace detail {
+template <typename... Args>
+auto WrapInvocation(facade::CmdArgList args, const CommandContext& cntx, void f(Args...)) {
+  Overloaded ov{
+      // Arguments
+      [&](facade::CmdArgList*) { return args; },
+      [&](facade::CmdArgParser*) { return facade::CmdArgParser{args}; },
+      // Context
+      [&](const CommandContext*) { return std::cref(cntx); },
+      [&](dfly::Transaction**) { return cntx.tx; },
+      [&](facade::SinkReplyBuilder**) { return cntx.rb; },
+      [&](ConnectionContext**) { return cntx.conn_cntx; },
+      // Utility
+      //[&](const facade::CommandId**) { return cntx.conn_cntx->cid; }
+  };
+  return std::tuple{ov((std::remove_reference_t<Args>*)nullptr)...};
+}
+}  // namespace detail
 
 // TODO: move it to helio
 // Makes sure that the POD T that is passed to the constructor is reset to default state
@@ -147,6 +168,13 @@ class CommandId : public facade::CommandId {
 
   bool IsBlocking() const {
     return opt_mask_ & CO::BLOCKING;
+  }
+
+  template <typename... Args> CommandId&& Wrap(void F(Args...)) {
+    handler_ = [F](facade::CmdArgList args, const CommandContext& cntx) {
+      std::apply(F, detail::WrapInvocation(args, cntx, F));
+    };
+    return std::move(*this);
   }
 
   CommandId&& SetHandler(Handler3 f) && {
