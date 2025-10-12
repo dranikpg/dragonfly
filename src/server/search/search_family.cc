@@ -959,17 +959,27 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
 }
 
-void SearchReply(const SearchParams& params,
+bool SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
+  // Count total number of hits
   size_t total_hits = 0;
+  for (auto& shard_results : results)
+    total_hits += shard_results.total_hits;
+
+  // Arrange documents in a stride
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
-  for (auto& shard_results : results) {
-    total_hits += shard_results.total_hits;
-    for (auto& doc : shard_results.docs) {
-      docs.push_back(&doc);
+  for (size_t i = 0;; ++i) {
+    bool added = false;
+    for (auto& shard_results : results) {
+      if (i < shard_results.docs.size()) {
+        added = true;
+        docs.push_back(&shard_results.docs[i]);
+      }
     }
+    if (!added)
+      break;
   }
 
   // Reorder and cut KNN results before applying SORT and LIMIT
@@ -995,6 +1005,14 @@ void SearchReply(const SearchParams& params,
     PartialSort(absl::MakeSpan(docs), end, params.sort_option->order,
                 &SerializedSearchDoc::sort_score);
 
+  // Check if we havent' chosen too few documents due to cutoffs
+  size_t left = docs.size() - params.limit_offset;
+  size_t expected = std::min(params.limit_total, total_hits - params.limit_offset);
+  if (left < expected)
+    return false;
+
+  // TODO: Check sort correctness
+
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
@@ -1011,6 +1029,7 @@ void SearchReply(const SearchParams& params,
 
     SendSerializedDoc(*docs[i], builder);
   }
+  return true;
 }
 
 // Warms up the query parser to avoid first-call slowness
@@ -1279,23 +1298,37 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+  bool succeeded = true;
+  do {
+    if (succeeded && !params->sort_option)
+      params->limit_serialization =
+          params->limit_offset +
+          std::min(params->limit_total, 2 * params->limit_total / shard_set->size());
     else
-      index_not_found.store(true, memory_order_relaxed);
-    return OpStatus::OK;
-  });
+      params->limit_serialization = params->limit_total + params->limit_offset;
 
-  if (index_not_found.load())
-    return builder->SendError(string{index_name} + ": no such index");
+    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      if (auto* index = es->search_indices()->GetIndex(index_name); index)
+        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+      else
+        index_not_found.store(true, memory_order_relaxed);
+      return OpStatus::OK;
+    });
 
-  for (const auto& res : docs) {
-    if (res.error)
-      return builder->SendError(*res.error);
-  }
+    if (index_not_found.load())
+      return builder->SendError(string{index_name} + ": no such index");
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+    for (const auto& res : docs) {
+      if (res.error)
+        return builder->SendError(*res.error);
+    }
+
+    bool did_succeed =
+        SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+    DCHECK(succeeded || did_succeed);
+    succeeded = did_succeed;
+    cmd_cntx.tx->Refurbish();
+  } while (!succeeded);
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1331,6 +1364,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
+  params->limit_serialization = params->limit_offset + params->limit_total;
   cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {

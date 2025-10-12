@@ -751,6 +751,37 @@ TEST_F(SearchFamilyTest, ReturnOptionJson) {
               MatchEntry("k1", "name", "dragon"));
 }
 
+struct ThreadBalanceTesst : public SearchFamilyTest, public testing::WithParamInterface<size_t> {
+  ThreadBalanceTesst() {
+    num_threads_ = 8;
+  }
+};
+
+// Test search cut optimizations with query results placed unbalanced on shards
+TEST_P(ThreadBalanceTesst, TestUnbalancedCut) {
+  size_t filled_shards = GetParam();
+  Run({"ft.create", "i1", "schema", "title", "text"});
+
+  size_t added = 0;
+  for (size_t i = 0; i < 500; i++) {
+    string key = absl::StrCat("k", i);
+    if (Shard(key, shard_set->size()) <= filled_shards)
+      continue;
+
+    Run({"hset", key, "text", "important text"});
+    added++;
+  }
+
+  auto res = Run({"ft.search", "i1", "*", "LIMIT", "0", "15"});
+  VLOG(0) << filled_shards << " " << added << " " << res;
+  EXPECT_THAT(res.GetVec()[0], IntArg(added));
+  EXPECT_EQ(res.GetVec().size(), 1 + 2 * 15);
+}
+
+INSTANTIATE_TEST_SUITE_P(Single, ThreadBalanceTesst, testing::Values(0));
+INSTANTIATE_TEST_SUITE_P(Some, ThreadBalanceTesst, testing::Values(3));
+INSTANTIATE_TEST_SUITE_P(More, ThreadBalanceTesst, testing::Values(6));
+
 TEST_F(SearchFamilyTest, TestStopWords) {
   Run({"ft.create", "i1", "STOPWORDS", "3", "red", "green", "blue", "SCHEMA", "title", "TEXT"});
 

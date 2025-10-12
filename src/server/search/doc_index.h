@@ -98,6 +98,7 @@ struct SearchParams {
   size_t limit_offset = 0;
   size_t limit_total = 10;
 
+  size_t limit_serialization = 0;
   /*
   1. If not set -> return all fields
   2. If set but empty -> no fields should be returned

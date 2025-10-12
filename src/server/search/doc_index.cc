@@ -400,7 +400,9 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   size_t limit = params.limit_offset + params.limit_total;
-  auto result = search_algo->Search(&*indices_);
+  bool can_cut_off = !params.sort_option && !search_algo->GetKnnScoreSortOption();
+  size_t id_cutoff_limit = can_cut_off ? limit : numeric_limits<size_t>::max();
+  auto result = search_algo->Search(&*indices_, id_cutoff_limit);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 
@@ -441,7 +443,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   }
 
   // Cut off unnecessary items
-  result.ids.resize(min(result.ids.size(), limit));
+  size_t serialization_limit = limit;
+  if (!search_algo->GetKnnScoreSortOption())
+    serialization_limit = params.limit_serialization;
+  result.ids.resize(min(result.ids.size(), serialization_limit));
 
   // Serialize documents
   vector<SerializedSearchDoc> out;
