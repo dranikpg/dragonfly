@@ -490,6 +490,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
+  const auto start_cycles = base::CycleClock::Now();
+
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;
   if (disk_stats.allocated_bytes + kMaxIterations / 2 * tiering::kPageSize >
@@ -519,6 +521,10 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
   } while (offloading_cursor_ && iterations++ < kMaxIterations);
+
+  const auto now_cycles = base::CycleClock::Now();
+  const auto took_cycles = now_cycles - start_cycles;
+  VLOG_IF(0, iterations > 0) << base::CycleClock::ToUsec(took_cycles) << "us for offloading";
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {
