@@ -17,6 +17,7 @@
 
 namespace facade {
 class SinkReplyBuilder;
+class RedisReplyBuilder;
 }  // namespace facade
 
 namespace dfly {
@@ -127,8 +128,15 @@ class CommandId : public facade::CommandId {
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
+  using Replier = std::function<void(facade::RedisReplyBuilder*)>;
+  using Handler4 = std::function<Replier(CmdArgList, const CommandContext&)>;
+
   // Returns the invoke time in usec.
   uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx) const;
+
+  Replier InvokeAsync(CmdArgList args, const CommandContext& cmd_cntx) const {
+    return async_handler_(args, cmd_cntx);
+  };
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -151,6 +159,15 @@ class CommandId : public facade::CommandId {
 
   CommandId&& SetHandler(Handler3 f) && {
     handler_ = std::move(f);
+    return std::move(*this);
+  }
+
+  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, const CommandContext&)) {
+    async_handler_ = f;
+    handler_ = [f](CmdArgList args, const CommandContext& cmd_cntx) {
+      auto replier = f(args, cmd_cntx);
+      replier((facade::RedisReplyBuilder*)(cmd_cntx.rb));
+    };
     return std::move(*this);
   }
 
@@ -198,6 +215,7 @@ class CommandId : public facade::CommandId {
   bool is_alias_{false};
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler3 handler_;
+  Handler4 async_handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };

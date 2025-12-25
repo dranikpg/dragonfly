@@ -1142,6 +1142,27 @@ void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 }
 
+auto Get2Cmd(CmdArgList args, const CommandContext& cmnd_cntx) {
+  auto result = new OpResult<string>();
+  auto cb = [key = args[0], result](Transaction* tx, EngineShard* es) -> OpStatus {
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok())
+      *result = it_res.status();
+    else
+      *result = (*it_res)->second.ToString();
+    VLOG(0) << "Fetched " << **result;
+    return OpStatus::OK;
+  };
+
+  cmnd_cntx.tx->Execute(cb, true, true);
+  return [result, tx = cmnd_cntx.tx](RedisReplyBuilder* rb) {
+    tx->Wait();
+    VLOG(0) << "Sending " << **result;
+    GetReplies{rb}.Send(**result);
+    delete result;
+  };
+}
+
 void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
@@ -1700,6 +1721,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
       << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
+      << CI{"GET2", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(&Get2Cmd)
       << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(GetEx)
       << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)

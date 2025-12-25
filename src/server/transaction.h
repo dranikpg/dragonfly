@@ -195,7 +195,9 @@ class Transaction {
   ShardArgs GetShardArgs(ShardId sid) const;
 
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
-  void Execute(RunnableType cb, bool conclude);
+  void Execute(RunnableType cb, bool conclude, bool noblock = false);
+
+  void Wait();
 
   // Execute single hop and conclude.
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.

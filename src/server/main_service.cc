@@ -1716,101 +1716,39 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
 DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
                                                  SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
+  VLOG(0) << "Dispatch many commands " << args_list.size();
+
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
   DCHECK_GT(args_list.size(), 1u);
 
-  auto* ss = dfly::ServerState::tlocal();
-  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (ss->IsPaused())
-    return {.processed = 0, .account_in_stats = false};
-
-  vector<StoredCmd> stored_cmds;
-  intrusive_ptr<Transaction> dist_trans;
-  uint32_t dispatched = 0;
-  MultiCommandSquasher::Stats stats;
-
-  uint64_t start_cycles = base::CycleClock::Now();
-
-  auto perform_squash = [&] {
-    if (stored_cmds.empty())
-      return;
-
-    if (!dist_trans) {
-      dist_trans.reset(new Transaction{exec_cid_});
-      dist_trans->StartMultiNonAtomic();
-    } else {
-      // Reset to original command id as it's changed during squashing
-      dist_trans->MultiSwitchCmd(exec_cid_);
-    }
-
-    dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Opts opts;
-    opts.verify_commands = true;
-    opts.max_squash_size = ss->max_squash_cmd_num;
-
-    stats += MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                           static_cast<RedisReplyBuilder*>(builder), dfly_cntx,
-                                           this, opts);
-    dfly_cntx->transaction = nullptr;
-
-    dispatched += stored_cmds.size();
-    stored_cmds.clear();
+  struct RunContext {
+    boost::intrusive_ptr<Transaction> tx;
+    CommandId::Replier replier;
   };
 
+  // Start running
+  vector<RunContext> run_queue;
   for (auto args : args_list) {
-    string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.subspan(1));
+    string cmd = absl::AsciiStrToUpper(args[0]);
+    const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
+    CHECK(cid);
+    VLOG(0) << cid->name();
 
-    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
-    // possible
-    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() ||
-                          (cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EXEC);
-
-    // Generally, executing any multi-transactions (including eval) is not possible because they
-    // might request a stricter multi mode than non-atomic which is used for squashing.
-    // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
-    // invocations, we can potentially execute multiple eval in parallel, which is very powerful
-    // paired with shardlocal eval
-    const bool is_eval = cid != nullptr && cid->MultiControlKind() == CO::MultiControlKind::EVAL;
-    const bool is_blocking = cid != nullptr && cid->IsBlocking();
-
-    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args);
-      continue;
-    }
-
-    // Squash accumulated commands
-    perform_squash();
-
-    // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (ss->IsPaused())
-      break;
-
-    // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, builder, cntx);
-    dispatched++;
+    RunContext ctx;
+    ctx.tx = new Transaction{cid};
+    ctx.tx->InitByArgs(dfly_cntx->ns, 0, args_no_cmd);
+    ctx.replier = cid->InvokeAsync(args_no_cmd, {ctx.tx.get(), builder, dfly_cntx});
+    run_queue.emplace_back(ctx);
   }
 
-  perform_squash();
+  // Clear reply queue
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  for (auto& ctx : run_queue)
+    ctx.replier(rb);
 
-  if (dist_trans)
-    dist_trans->UnlockMulti();
-
-  uint64_t total_usec = base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
-  bool account_in_stats = total_usec > squash_stats_latency_lower_limit_cached;
-  if (account_in_stats) {
-    auto* ss = ServerState::tlocal();
-    ss->stats.multi_squash_exec_hop_usec += stats.hop_usec;
-    ss->stats.multi_squash_exec_reply_usec += stats.reply_usec;
-    ss->stats.multi_squash_hops += stats.hops;
-    ss->stats.squashed_commands += stats.squashed_commands;
-  } else {
-    ss->stats.squash_stats_ignored++;
-  }
-  return {.processed = dispatched, .account_in_stats = account_in_stats};
+  return {.processed = uint32_t(args_list.size()), .account_in_stats = false};
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
