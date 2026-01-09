@@ -881,6 +881,60 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   return "";
 }
 
+// Check CLIENT PAUSE state and block if needed
+void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+  auto& etl = *ServerState::tlocal();
+  if (etl.IsPaused() && !conn->IsPrivileged()) {
+    bool is_write = cid->IsJournaled();
+    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+
+    dfly_cntx->paused = true;
+    etl.AwaitPauseState(is_write);
+    dfly_cntx->paused = false;
+  }
+}
+
+// Prepare transaction for DispatchCommand
+optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction>* tx,
+                                                const CommandId* cid, ArgSlice tail_args,
+                                                ConnectionContext* dfly_cntx) {
+  bool init = false;
+  if (dfly_cntx->transaction) {
+    DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
+    if (cid->IsTransactional()) {
+      dfly_cntx->transaction->MultiSwitchCmd(cid);
+      init = true;
+    }
+  } else {
+    if (cid->IsTransactional()) {
+      tx->reset(new Transaction{cid});
+      dfly_cntx->transaction = tx->get();
+      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
+      init = !tx->get()->IsMulti();  // Multi command initialize themself based on their mode
+    } else {
+      dfly_cntx->transaction = nullptr;
+    }
+  }
+
+  if (init) {
+    auto* tx = dfly_cntx->transaction;
+    OpStatus status = tx->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
+    if (status != OpStatus::OK)
+      return facade::ErrorReply{status};
+  }
+
+  return nullopt;
+}
+
+void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
+  // TODO: protect against aggregating huge transactions.
+  auto& exec_info = dfly_cntx->conn_state.exec_info;
+  const size_t old_size = exec_info.GetStoredCmdBytes();
+  exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
+  ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1402,20 +1456,16 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
-                                        facade::ParsedCommand* parsed_cmd) {
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
+                                        facade::AsyncPreference async_pref) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
-
   absl::Cleanup clear_last_error([parsed_cmd]() { parsed_cmd->rb()->ConsumeLastError(); });
-  ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
-
   if (cid == nullptr) {
-    auto reply = ReportUnknownCmd(cmd);
-    parsed_cmd->SendError(reply.ToSv(), reply.kind);
+    parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
 
@@ -1428,26 +1478,17 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
-  if (cmnd_cntx->conn()) {  // no owner in replica context.
-    auto* conn = cmnd_cntx->conn();
-
+  // Block on CLIENT PAUSE if needed
+  if (auto* conn = cmnd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
     }
-
-    // Don't interrupt running multi commands or admin connections.
-    if (etl.IsPaused() && !dispatching_in_multi && !conn->IsPrivileged()) {
-      bool is_write = cid->IsJournaled();
-      is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-      is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
-
-      dfly_cntx->paused = true;
-      etl.AwaitPauseState(is_write);
-      dfly_cntx->paused = false;
-    }
+    if (!dispatching_in_multi)  // Don't interrupt parts of multi command
+      CheckPauseState(conn, dfly_cntx, cid);
   }
 
+  // Verify command state
   if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
@@ -1467,7 +1508,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       }
     }
     DCHECK(!err->status);
-    cmnd_cntx->SendError(err->ToSv(), err->kind);
+    cmnd_cntx->SendError(*err);
     return DispatchResult::ERROR;
   }
 
@@ -1475,56 +1516,19 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       << "Executing dangerous command " << cid->name() << " "
       << ConnectionLogContext(dfly_cntx->conn());
 
+  // If inside MULTI block, store command
   bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
-    // TODO: protect against aggregating huge transactions.
-    auto& exec_info = dfly_cntx->conn_state.exec_info;
-    const size_t old_size = exec_info.GetStoredCmdBytes();
-    exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
-    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
-    if (cid->IsJournaled()) {
-      exec_info.is_write = true;
-    }
+    StoreInMultiBlock(dfly_cntx, cid, tail_args);
     cmnd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
-
-  if (dispatching_in_multi) {
-    DCHECK(dfly_cntx->transaction);
-    if (cid->IsTransactional()) {
-      dfly_cntx->transaction->MultiSwitchCmd(cid);
-      OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
-
-      if (status != OpStatus::OK) {
-        cmnd_cntx->SendError(status);
-        return DispatchResult::ERROR;
-      }
-    }
-  } else {
-    DCHECK(dfly_cntx->transaction == nullptr);
-
-    if (cid->IsTransactional()) {
-      dist_trans.reset(new Transaction{cid});
-
-      if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
-        CHECK(dfly_cntx->ns != nullptr);
-        if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
-            st != OpStatus::OK) {
-          cmnd_cntx->SendError(StatusToMsg(st));
-          return DispatchResult::ERROR;
-        }
-      }
-
-      dfly_cntx->transaction = dist_trans.get();
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
-    } else {
-      dfly_cntx->transaction = nullptr;
-    }
+  if (auto err = PrepareTransaction(&dist_trans, cid, tail_args, dfly_cntx); err) {
+    cmnd_cntx->SendError(*err);
+    return DispatchResult::ERROR;
   }
 
   DispatchResult res = DispatchResult::ERROR;
@@ -1770,7 +1774,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, &dummy_cmd_cntx);
+    DispatchCommand(args, &dummy_cmd_cntx, AsyncPreference::ONLY_SYNC);
     dispatched++;
   }
 
@@ -1793,7 +1797,8 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
-DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
+DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
+                                   facade::AsyncPreference apref) {
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
 
@@ -1886,7 +1891,7 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
     args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
   }
 
-  return DispatchCommand(ParsedArgs{args}, parsed_cmd);
+  return DispatchCommand(ParsedArgs{args}, parsed_cmd, apref);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
@@ -2093,7 +2098,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     return;
 
   auto* prev = cmd_cntx->SwapReplier(&replier);
-  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx);
+  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
   cmd_cntx->SwapReplier(prev);
 }
 

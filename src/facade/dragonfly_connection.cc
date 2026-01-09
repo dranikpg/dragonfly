@@ -501,7 +501,7 @@ void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
   DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd);
+  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC);
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -1182,7 +1182,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_sync = [this] {
     FillBackedArgs(tmp_parse_args_, parsed_cmd_);
-    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
+    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
+                              facade::AsyncPreference::ONLY_SYNC);
   };
 
   auto dispatch_async = [this]() -> MessageHandle {
@@ -2091,7 +2092,7 @@ bool Connection::ExecuteMCBatch() {
 
     if (!has_replied) {
       DCHECK(cmd->conn_cntx() == cc_.get());
-      service_->DispatchMC(cmd);
+      service_->DispatchMC(cmd, AsyncPreference::ONLY_SYNC);
 
       // If the reply was not deferred, then DispatchMC has surely replied.
       has_replied = !cmd->IsDeferredReply();
