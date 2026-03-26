@@ -11,11 +11,11 @@
 #include <absl/time/clock.h>
 #include <mimalloc.h>
 #include <openssl/evp.h>
+#include <re2/re2.h>
 #include <xxhash.h>
 
 #include <cstring>
 #include <optional>
-#include <regex>
 #include <set>
 #include <variant>
 
@@ -816,7 +816,6 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
-
 optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   // We want to detect `redis.call` expressions with unused return values, i.e. they are a
   // standalone statement, not part of a expression, condition, function call or assignment.
@@ -827,7 +826,13 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   //
   // If we need to check the previous line, we search for the last word (before comments, if it has
   // one).
-  static const regex kRegex{"(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)"};
+
+  // Using RE2 instead of std::regex to avoid stack overflow on fiber stacks (64KB).
+  // RE2 is DFA-based with zero stack recursion — all state is heap-allocated.
+  // (?m) enables multiline mode so that ^ matches at line beginnings.
+  // (?s) enables dotall mode so that . matches \n (needed for \\s* spanning lines).
+  static const re2::RE2 kRegex(
+      "(?ms)(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)");
 
   // Taken from https://www.lua.org/manual/5.4/manual.html - 3.1 - Lexical conventions
 
@@ -841,11 +846,10 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
                                                "if",     "in",     "local",  "not",  "or",
                                                "repeat", "return", "until",  "while"};
 
-  auto last_n = [](const string& s, size_t n) {
+  auto last_n = [](re2::StringPiece s, size_t n) -> re2::StringPiece {
     return s.size() < n ? s : s.substr(s.size() - n, n);
   };
 
-  smatch sm;
   string body{body_sv};
   vector<size_t> targets;
 
@@ -853,20 +857,31 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   if (body.find("--[[") != string::npos)
     return {};
 
-  sregex_iterator it{body.begin(), body.end(), kRegex};
-  sregex_iterator end{};
+  re2::StringPiece input(body);
+  re2::StringPiece last_word_piece, comment_piece, then_piece, do_piece, caret_piece, call_piece;
 
-  for (; it != end; it++) {
-    auto last_word = it->str(1);
+  // FindAndConsume advances `input` past each match, so we track position via pointer arithmetic.
+  const char* body_start = body.data();
 
-    if (kContOperators.count(last_n(last_word, 2)) > 0 ||
-        kContOperators.count(last_n(last_word, 1)) > 0)
-      continue;
+  while (RE2::FindAndConsume(&input, kRegex, &last_word_piece, &comment_piece, &then_piece,
+                             &do_piece, &caret_piece, &call_piece)) {
+    // call_piece points into `body` — its position is the insertion target.
+    size_t call_pos = call_piece.data() - body_start;
 
-    if (kContTokens.count(last_word) > 0)
-      continue;
+    // Group 1 = (\S+) — last word on previous line. Empty if then/do/^ matched instead.
+    string_view last_word(last_word_piece.data(), last_word_piece.size());
 
-    targets.push_back(it->position(it->size() - 1));
+    if (!last_word.empty()) {
+      re2::StringPiece lw(last_word);
+      if (kContOperators.count(string_view(last_n(lw, 2).data(), last_n(lw, 2).size())) > 0 ||
+          kContOperators.count(string_view(last_n(lw, 1).data(), last_n(lw, 1).size())) > 0)
+        continue;
+
+      if (kContTokens.count(last_word) > 0)
+        continue;
+    }
+
+    targets.push_back(call_pos);
   }
 
   if (targets.empty())

@@ -196,6 +196,12 @@ if(WITH_SIMSIMD)
   )
 endif()
 
+add_third_party(
+  re2
+  URL https://github.com/google/re2/archive/refs/tags/2024-07-02.tar.gz
+  CMAKE_PASS_FLAGS "-DRE2_BUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF"
+  LIB libre2.a
+)
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
