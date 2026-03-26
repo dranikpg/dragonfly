@@ -196,12 +196,36 @@ if(WITH_SIMSIMD)
   )
 endif()
 
-add_third_party(
+# Build RE2 in-tree so it uses our FetchContent-provided abseil
+FetchContent_Declare(
   re2
-  URL https://github.com/google/re2/archive/refs/tags/2024-07-02.tar.gz
-  CMAKE_PASS_FLAGS "-DRE2_BUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF"
-  LIB libre2.a
+  URL https://github.com/google/re2/archive/refs/tags/2025-08-12.tar.gz
 )
+
+if (POLICY CMP0169)
+  cmake_policy (SET CMP0169 OLD) # silence deprecation warning about FetchContent_Populate
+endif()
+
+FetchContent_GetProperties(re2)
+if(NOT re2_POPULATED)
+  FetchContent_Populate(re2)
+  set(RE2_BUILD_TESTING OFF CACHE BOOL "")
+  set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+
+  # RE2 2024-07-02 has unconditional install() calls that fail because
+  # our in-tree abseil targets aren't in any export set.
+  # Override install() to be a no-op for the RE2 subdirectory.
+  macro(install)
+  endmacro()
+
+  add_subdirectory(${re2_SOURCE_DIR} ${re2_BINARY_DIR} EXCLUDE_FROM_ALL)
+
+  # Restore the real install() command
+  cmake_language(EVAL CODE "macro(install)\n_install(\${ARGV})\nendmacro()")
+
+  set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
+endif()
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
