@@ -5,6 +5,7 @@ from redis import asyncio as aioredis
 from pathlib import Path
 
 from . import dfly_args
+from .instance import DflyInstanceFactory
 from .utility import wait_available_async
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
@@ -83,7 +84,9 @@ class TestShutdownOptions:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("flavour", ["SAVE", "SAFE"])  # valkey uses SAFE instead of SAVE
-    async def test_shutdown_save_persists_snapshot(self, df_factory, tmp_path, flavour):
+    async def test_shutdown_save_persists_snapshot(
+        self, df_factory: DflyInstanceFactory, tmp_path, flavour
+    ):
         # Ensure snapshot dir exists and is used
         snap_dir = tmp_path
         df_args = {"dbfilename": "dump", "dir": str(snap_dir) + "/", "port": 1122}
@@ -104,10 +107,13 @@ class TestShutdownOptions:
 
         await client.connection_pool.disconnect()
 
+        df_server.wait()
         lines = df_server.find_in_logs("Exit SnapshotSerializer")
-        assert lines == [
+        assert len(lines) == 1
+        assert (
             "Exit SnapshotSerializer total_serialized: 1, buckets side saved 0, total bucket saved 1, journal_saved 0"
-        ]
+            in lines[0]
+        )
 
         # Restart and verify data persisted
         df_server.start()
