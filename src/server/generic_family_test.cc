@@ -723,6 +723,11 @@ TEST_F(GenericFamilyTest, Sort) {
   // desc strig
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(),
               ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+  // ASC/DESC are not mutually exclusive — last one wins (matches Redis behavior).
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "ASC"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "ASC", "DESC"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   // limits
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
@@ -1358,6 +1363,83 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchField) {
 TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
   EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+}
+
+TEST_F(GenericFamilyTest, IterateMapSetStaleTimeZombie) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+
+  Run({"DEBUG", "OBJHIST"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+TEST_F(GenericFamilyTest, DebugUniqStrsDeletesEmptyContainers) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+  Run({"DEBUG", "UNIQ-STRS"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+// Regression: TraverseAllEntries walks every DB but the callback used the
+// connection-selected DB for deletion.  A zombie in DB 1 could cause a
+// same-named non-empty key in DB 0 to be deleted incorrectly.
+TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
+  // Live hash in DB 0 under the same key name as the zombie in DB 1.
+  Run({"SELECT", "0"});
+  Run({"HSET", "shared", "alive", "value"});
+
+  Run({"SELECT", "1"});
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "shared", "1", absl::StrCat("f", i), "v"});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "shared", "f0"});  // enable lazy expiry on DB 1's hash
+  Run({"DEBUG", "OBJHIST"});
+
+  // Zombie in DB 1 must be deleted.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "shared"}));
+
+  // Live hash in DB 0 must survive.
+  Run({"SELECT", "0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "shared"}));
+  EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
+}
+
+TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  // ZINTERSTORE needs at least one non-empty input to reach ScoreMapFromSet.
+  Run({"ZADD", "zkey", "1", "m0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  AdvanceTime(2000);
+
+  // ZINTERSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
+  Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
 }
 
 TEST_F(GenericFamilyTest, ZUnionStoreDeletesEmptySet) {

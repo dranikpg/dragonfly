@@ -68,6 +68,9 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/script_mgr.h"
+#ifdef WITH_SEARCH
+#include "server/search/global_hnsw_index.h"
+#endif
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
@@ -297,10 +300,6 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
-#if defined(WITH_AWS) || defined(WITH_AWS_CLOUD)
-#ifdef WITH_AWS
-    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-#endif
     auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
@@ -311,10 +310,6 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
       exit(1);
     }
     return aws;
-#else
-    LOG(ERROR) << "Compiled without AWS support";
-    exit(1);
-#endif
   } else if (detail::IsGCSPath(uri)) {
 #ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
@@ -1283,7 +1278,7 @@ void ServerFamily::Shutdown() {
     }
     StopAllClusterReplicas();
 
-    dfly_cmd_->Shutdown();
+    dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
 #ifdef WITH_SEARCH
     SearchFamily::Shutdown();
@@ -1445,6 +1440,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     } else {
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
+
+      // Loaded data bypasses the journal, so force replicas into full sync.
+      dfly_cmd_->CancelReplicas();
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (shard->journal())
+          journal::ClearBuffer();
+      });
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -2150,6 +2152,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
 
+  // Replication Info
+  if (m.replica_side_info) {
+    const ReplicaSummary& rsummary = m.replica_side_info->summary;
+    AppendMetricWithoutLabels("master_link_status", "1 if up 0 if down",
+                              rsummary.master_link_established ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    AppendMetricWithoutLabels("master_last_io_seconds_ago", "Last Master IO Seconds Ago",
+                              rsummary.master_last_io_sec, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("master_sync_in_progress", "1 if true 0 if false",
+                              rsummary.full_sync_in_progress ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    // Print last known offset either during stable sync (online) or during disconnects when
+    // the full sync phase did not start yet.
+    if (rsummary.full_sync_done || (rsummary.passed_full_sync && !rsummary.master_link_established))
+      AppendMetricWithoutLabels("slave_repl_offset", "Slave Replication Offset",
+                                rsummary.repl_offset_sum, MetricType::GAUGE, &resp->body());
+  }
+
   // Stream access pattern metrics
   if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
       m.shard_stats.stream_fetch_all_accesses) {
@@ -2431,7 +2451,8 @@ bool ServerFamily::TEST_IsSaving() const {
 }
 
 void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
-  VLOG(1) << "Drakarys";
+  LOG(INFO) << "Drakarys start db=" << db_ind << " wait=" << wait
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
@@ -2444,6 +2465,11 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   auto action = wait ? &fb2::Fiber::JoinIfNeeded : &fb2::Fiber::Detach;
   for (auto& f : fibers)
     (f.*action)();
+
+  LOG(INFO) << (wait ? "Drakarys main done (shards joined)"
+                     : "Drakarys main dispatched (shards detached; per-shard 'finished decommit' "
+                       "logs mark real completion)")
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -2899,12 +2925,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
 
   if (args.size() >= 2) {
     if (detail::IsS3Path(ArgS(args, 1))) {
-#ifdef WITH_AWS
       save_cmd_opts.cloud_uri = ArgS(args, 1);
-#else
-      LOG(ERROR) << "Compiled without AWS support";
-      exit(1);
-#endif
     } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {
@@ -3071,6 +3092,16 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
+#ifdef WITH_SEARCH
+  // HNSW indices live in a single global registry shared across shards, so their
+  // footprint must be added once — not per-shard. Track it in both the search_used
+  // breakdown (memory_by_class_bytes{class="search_used"}) and the overall heap
+  // gauge (memory_used_bytes). See issue #7110.
+  size_t hnsw_memory = GlobalHnswIndexRegistry::Instance().GetTotalMemoryUsage();
+  result.search_stats.used_memory += hnsw_memory;
+  result.heap_used_bytes += hnsw_memory;
+#endif
+
   uint64_t after_cb = absl::GetCurrentTimeNanos();
 
   // Normalize moving average stats
@@ -3088,6 +3119,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+  result.acl_stats = service_.user_registry().GetAclStats();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -3623,6 +3655,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
       append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
     }
+  }
+
+  if (should_enter("ACL", true)) {
+    const auto& acl = m.acl_stats;
+    append("acl_num_users", acl.num_users);
+    append("acl_num_passwords", acl.num_passwords);
+    append("acl_num_cat_changes", acl.num_cat_changes);
+    append("acl_num_cmd_changes", acl.num_cmd_changes);
+    append("acl_num_key_globs", acl.num_key_globs);
+    append("acl_key_globs_bytes", acl.key_globs_bytes);
+    append("acl_num_pubsub_globs", acl.num_pubsub_globs);
+    append("acl_pubsub_globs_bytes", acl.pubsub_globs_bytes);
+    append("acl_total_bytes", acl.TotalBytes());
   }
 
   return info;

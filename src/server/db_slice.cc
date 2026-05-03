@@ -5,6 +5,7 @@
 #include "server/db_slice.h"
 
 #include "core/dense_set.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/hyperloglog.h"
@@ -963,10 +964,17 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
-  auto cb = [flush_db_arr = std::move(flush_db_arr)]() mutable {
+  ShardId shard_id = owner_->shard_id();
+  auto cb = [flush_db_arr = std::move(flush_db_arr), shard_id]() mutable {
+    LOG(INFO) << "Drakarys shard " << shard_id << " cb entered (pre-destructors)"
+              << " rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
+    LOG(INFO) << "Drakarys shard " << shard_id << " finished decommit"
+              << " rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
   };
 
   return {"flush_dbs", std::move(cb)};
@@ -1432,8 +1440,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   // Send and clear accumulated expired key events
   if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
-    ChannelStore* store = ServerState::tlocal()->channel_store();
-    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events, false);
+    channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events,
+                                false);
     events.clear();
   }
 

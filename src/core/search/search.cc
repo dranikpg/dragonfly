@@ -76,6 +76,7 @@ struct ProfileBuilder {
         [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
+        [](const AstOptionalNode& n) { return absl::StrCat("Optional{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
         [](const AstGeoNode& n) {
@@ -115,8 +116,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, std::optional<ScorerType> scorer = std::nullopt)
-      : indices_{indices}, scorer_type_{scorer} {
+  BasicSearch(const FieldIndices* indices, ScorerFn scorer = nullptr)
+      : indices_{indices}, scorer_{scorer} {
   }
 
   void EnableProfiling() {
@@ -234,7 +235,7 @@ struct BasicSearch {
 
     // Track matched terms for scoring (prefix/suffix/infix expand to multiple terms).
     // Synonym shadow entries (freq=0) are resolved to their group_id for correct scoring.
-    if (scorer_type_) {
+    if (scorer_) {
       for (auto* index : indices) {
         auto term_cb = [this, index](string_view term, const auto*) {
           std::string resolved{term};
@@ -280,7 +281,7 @@ struct BasicSearch {
 
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index) {
-        if (scorer_type_)
+        if (scorer_)
           AddMatchedTerm(index, term);
         return IndexResult{index->Matching(term, strip_whitespace)};
       }
@@ -290,7 +291,7 @@ struct BasicSearch {
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
 
     // Track terms for scoring
-    if (scorer_type_) {
+    if (scorer_) {
       for (auto* index : selected_indices)
         AddMatchedTerm(index, term);
     }
@@ -322,6 +323,9 @@ struct BasicSearch {
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
     auto matched = SearchGeneric(*node.node, active_field).Take().first;
+    if (!error_.empty())
+      return IndexResult{};
+
     vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
@@ -331,6 +335,20 @@ struct BasicSearch {
     };
     all.erase(remove_if(all.begin(), all.end(), pred), all.end());
     return IndexResult{std::move(all)};
+  }
+
+  IndexResult Search(const AstOptionalNode& node, string_view active_field) {
+    // ~ tolerates inner failures: it's a soft scoring boost, not a filter.
+    // E.g. @noindex_field:~hello can't actually populate matched_text_terms_
+    // (no index to query) — but the operator should still return all docs.
+    // Save/restore error_ so a transient inner failure doesn't poison the
+    // outer query.
+    string saved_error = std::move(error_);
+    SearchGeneric(*node.node, active_field);
+    error_ = std::move(saved_error);
+    // ~ never filters: return the full doc set, including docs that lack the
+    // active field. Mirrors AstNegateNode which also operates on global all-docs.
+    return IndexResult{&indices_->GetAllDocs()};
   }
 
   // logical query: unify all sub results
@@ -505,9 +523,26 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    if (scorer_type_ && !matched_text_terms_.empty()) {
+    if (scorer_ && !matched_text_terms_.empty()) {
       // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
       auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
+
+      // KNN populated knn_scores_ in distance order; TakeScoredTopK reordered
+      // `out` by text score, so realign knn_scores_ to the new id order.
+      // Consumers (e.g. search_family.cc) index ids and knn_scores by position.
+      if (!knn_scores_.empty()) {
+        absl::flat_hash_map<DocId, float> knn_by_id;
+        knn_by_id.reserve(knn_scores_.size());
+        for (auto& [doc, dist] : knn_scores_)
+          knn_by_id.emplace(doc, dist);
+        knn_scores_.clear();
+        knn_scores_.reserve(out.size());
+        for (DocId doc : out) {
+          if (auto it = knn_by_id.find(doc); it != knn_by_id.end())
+            knn_scores_.emplace_back(doc, it->second);
+        }
+      }
+
       return SearchResult{
           total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
           std::move(profile), std::move(error_)};
@@ -573,7 +608,7 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].index->GetFieldAvgDocLen();
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_type_, ctx, term_infos)), doc);
+      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
     }
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
@@ -602,7 +637,7 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
-  std::optional<ScorerType> scorer_type_;
+  ScorerFn scorer_ = nullptr;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
@@ -866,7 +901,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
   DCHECK(query_);
 
-  auto bs = BasicSearch{index, scorer_type_};
+  auto bs = BasicSearch{index, scorer_};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
@@ -915,8 +950,8 @@ void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
 
-void SearchAlgorithm::SetScorer(ScorerType type) {
-  scorer_type_ = type;
+void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+  scorer_ = scorer;
 }
 
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
