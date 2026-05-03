@@ -37,6 +37,7 @@ struct BucketDependencies {
   void Wait(BucketIdentity bucket) const;
   bool DEBUG_IsBusy(BucketIdentity) const;
 
+  // Wait for no dependencies to exist
   void WaitEmpty() const;
   bool HasAny() const {
     return deps_.size() > 0;
@@ -46,6 +47,7 @@ struct BucketDependencies {
   using SharedLatch = std::shared_ptr<LocalLatch>;
   absl::flat_hash_map<BucketIdentity, SharedLatch> deps_;
 
+  // Triggered when all dependencies are resolved
   mutable util::fb2::CondVarAny empty_q_;
 };
 
@@ -126,11 +128,11 @@ class SerializerBase : public BucketDependencies,
 
   void OnChange(DbIndex db_index, const ChangeReq& req) override;
 
-  bool HasActiveSerialization() const override {
+  bool IsAnyBucketBlocked() const override {
     return BucketDependencies::HasAny();
   }
 
-  void WaitForActiveToFinish() const override;
+  void UnblockAllBuckets() const override;
 
   // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
   void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);

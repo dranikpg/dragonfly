@@ -84,15 +84,19 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  // Consumer of bucket change events than can be registered inside the slice.
+  // It also includes additional methods for interfacing with snapshots and migrations.
   struct ChangeConsumerInterface {
+    // Called before a specific bucket (or set of buckets) will be mutated
     virtual void OnChange(DbIndex, const ChangeReq&) = 0;
 
-    // Should return true if any value is mid-serialization
-    virtual bool HasActiveSerialization() const {
+    // Should return true if any bucket is mid-serialization
+    virtual bool IsAnyBucketBlocked() const {
       return false;
     }
 
-    virtual void WaitForActiveToFinish() const {
+    // Should wait for IsAnyBucketBlocked to return false
+    virtual void UnblockAllBuckets() const {
     }
 
     uint64_t snapshot_version_ = 0;
@@ -495,8 +499,12 @@ class DbSlice {
   // if it's not empty and not EX.
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
+  // Returns true if any registered snapshot is blocked on bucket serialiazion (big value, delayed)
+  // and thus might reject the journal change
   bool WillBlockOnJournalWrite() const;
-  void WaitUnblockJournalWrite() const;
+
+  // Block and wait for WillBlockOnJournalWrite to become false
+  void WaitForUnblockedJournalWrites() const;
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
 

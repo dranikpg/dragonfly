@@ -1331,7 +1331,7 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 void DbSlice::ExpireAllIfNeeded() {
   // We hold no locks to any of the keys so we should Wait() here such that
   // we don't preempt in ExpireIfNeeded
-  WaitUnblockJournalWrite();
+  WaitForUnblockedJournalWrites();
 
   // Disable flush journal changes to prevent preemtion in traverse.
   journal::DisableFlushGuard journal_flush_guard(owner_->journal());
@@ -1369,14 +1369,12 @@ void DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
 }
 
 bool DbSlice::WillBlockOnJournalWrite() const {
-  return ranges::any_of(change_cb_, [](const auto* cb) { return cb->HasActiveSerialization(); });
+  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
 }
 
-void DbSlice::WaitUnblockJournalWrite() const {
-  while (WillBlockOnJournalWrite()) {
-    for (auto* consumer : change_cb_)
-      consumer->WaitForActiveToFinish();
-  }
+void DbSlice::WaitForUnblockedJournalWrites() const {
+  while (WillBlockOnJournalWrite())
+    ranges::for_each(change_cb_, &ChangeConsumerInterface::UnblockAllBuckets);
 }
 
 // Ordering invariant (PIT mode):
@@ -1923,7 +1921,7 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       // We must not change the bucket's internal order during serialization
-      WaitUnblockJournalWrite();
+      WaitForUnblockedJournalWrites();
       PrimeBumpPolicy policy;
       auto bump_it = db.prime.BumpUp(it, policy);
       if (bump_it != it) {  // the item was bumped

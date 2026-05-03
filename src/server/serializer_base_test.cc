@@ -414,6 +414,13 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
   for (unsigned i = 0; i < kKeys; i++)
     Run({"SET", absl::StrCat("key:", i), "V"});
 
+  // Reallow delayed entry resolution
+  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
+
+  // Trigger changes with dels
+  for (unsigned i = 0; i < kKeys; i++)
+    Run({"SET", absl::StrCat("key:", i), "V"});
+
   Finish();
 }
 

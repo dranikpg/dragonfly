@@ -195,7 +195,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   return true;
 }
 
-void SerializerBase::WaitForActiveToFinish() const {
+void SerializerBase::UnblockAllBuckets() const {
   BucketDependencies::WaitEmpty();
 }
 
