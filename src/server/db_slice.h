@@ -412,6 +412,8 @@ class DbSlice {
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
   void RegisterOnChange(ChangeConsumerInterface* consumer);
+
+  // Unregister consumer. Not allowed to be called form the consumer callback
   void UnregisterOnChange(ChangeConsumerInterface* consumer);
 
   bool HasRegisteredCallbacks() const {

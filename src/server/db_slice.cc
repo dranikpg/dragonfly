@@ -1373,6 +1373,7 @@ bool DbSlice::WillBlockOnJournalWrite() const {
 }
 
 void DbSlice::WaitForUnblockedJournalWrites() const {
+  std::lock_guard lk{change_cb_latch_};
   while (WillBlockOnJournalWrite())
     ranges::for_each(change_cb_, &ChangeConsumerInterface::UnblockAllBuckets);
 }
