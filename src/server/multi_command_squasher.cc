@@ -210,45 +210,22 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.dispatched.empty());
 
-  CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
+  auto* tx = sinfo.local_tx.get();
   CmdArgVec arg_vec;
-  CommandContext local_cntx{&crb, cntx_};
-  local_cntx.SetupTx(nullptr, sinfo.local_tx.get());
-
-  auto move_reply = [&sinfo, &crb](ShardExecInfo::Command* cmd) {
-    if (cmd->cmd_cntx)
-      return cmd->cmd_cntx->Resolve(crb.Take());
-
-    cmd->reply = crb.Take();
-    size_t sz = Size(cmd->reply);
-    sinfo.reply_size_delta += sz;
-    sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
-  };
 
   for (auto& dispatched : sinfo.dispatched) {
-    auto* ctx = &local_cntx;
     auto args = dispatched.Slice(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(*dispatched.cid, args, *cntx_); err) {
-        crb.SendError(std::move(*err));
-        move_reply(&dispatched);
+        dispatched.cmd_cntx->SendError(*err);
         continue;
       }
     }
 
-    crb.SetReplyMode(dispatched.reply_mode);
-
-    // With tiered storage enabled, it makes sense to dispatch async commands concurrently
-    // to allow concurrent disk operations. Tiered futures are only blocked on during replies
-    bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
-                    dispatched.cid->SupportsAsync();
-    if (do_async) {
-      ctx = dispatched.cmd_cntx;
-      ctx->SetDeferredReply();
-    }
-
-    ctx->SetupTx(dispatched.cid, local_cntx.tx());
+    auto* ctx = dispatched.cmd_cntx;
+    ctx->SetDeferredReply();
+    ctx->SetupTx(dispatched.cid, tx);
     ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
     auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
@@ -260,11 +237,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       service_->InvokeCmd(args, ctx);
     }
 
-    if (!do_async) {
-      move_reply(&dispatched);  // Async commands resolve the context directly
-    } else if (!ctx->CanReply()) {
-      ctx->Blocker()->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
-    }
+    if (!ctx->CanReply())
+      ctx->Blocker()->Wait();
   }
 
   return OpStatus::OK;
