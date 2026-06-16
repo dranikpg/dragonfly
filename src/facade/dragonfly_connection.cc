@@ -713,7 +713,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       service_(service),
       flags_(0) {
   constexpr size_t kReqSz = sizeof(ParsedCommand);
-  static_assert(kReqSz <= 256);
+  static_assert(kReqSz <= 384);  // Must fit in mimalloc 384-byte size class
 
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {

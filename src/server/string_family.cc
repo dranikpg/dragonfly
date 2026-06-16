@@ -739,7 +739,7 @@ struct GetReplies {
   RedisReplyBuilder* rb;
 };
 
-cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR ExtendGeneric(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
   bool prepend = cmd_cntx->cid()->name().starts_with('P');
 
@@ -1118,7 +1118,7 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
   return sparams;
 }
 
-cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSet(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
   auto params_result = ParseSetParams(parser, cmd_cntx);
 
@@ -1192,7 +1192,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetExGeneric(CmdArgParser& parser, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid()->name();
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
@@ -1227,7 +1227,7 @@ cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetNx(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
@@ -1257,7 +1257,7 @@ cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGet(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1270,7 +1270,7 @@ cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetDel(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1326,7 +1326,7 @@ void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetSet(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   optional<StringResult> prev;
@@ -1346,7 +1346,7 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetEx(CmdArgParser& parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
@@ -1412,7 +1412,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncr(CmdArgParser& parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   int64_t delta = 1;
   if (auto* mc = cmd_cntx->mc_command()) {
@@ -1425,7 +1425,7 @@ cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, delta);
 }
 
-cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncrBy(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, sval] = parser.Next<string_view, string_view>();
   int64_t val;
 
@@ -1436,7 +1436,7 @@ cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, val);
 }
 
-cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncrByFloat(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, sval] = parser.Next<string_view, string_view>();
   double val;
 
@@ -1458,7 +1458,7 @@ cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdDecr(CmdArgParser& parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   int64_t delta = 1;
   if (auto* mc = cmd_cntx->mc_command()) {
@@ -1471,7 +1471,7 @@ cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
   return IncrByGeneric(cmd_cntx, key, -delta);
 }
 
-cmd::CmdR CmdDecrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdDecrBy(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, sval] = parser.Next<string_view, string_view>();
   int64_t val;
 
@@ -1576,14 +1576,14 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdMGet(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdMGet(CmdArgParser& parser, CommandContext* cmd_cntx) {
   return MGetGeneric(cmd_cntx, std::nullopt);
 }
 
 // Implements the memcache GAT command. The expected input is
 // GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
-cmd::CmdR CmdGAT(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGAT(CmdArgParser& parser, CommandContext* cmd_cntx) {
   if (!cmd_cntx->mc_command()) {
     cmd_cntx->SendError("GAT is a memcache-only command");
     return cmd::kAborted;
@@ -1658,7 +1658,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdStrLen(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
@@ -1666,7 +1666,7 @@ cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetRange(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.TakeError(); err)
@@ -1680,7 +1680,7 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetRange(CmdArgParser& parser, CommandContext* cmd_cntx) {
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
 
   if (auto err = parser.TakeError(); err)

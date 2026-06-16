@@ -7,8 +7,20 @@
 #include <absl/cleanup/cleanup.h>
 
 #include "base/logging.h"
+#include "server/command_registry.h"
 
 namespace dfly::cmd {
+
+void* CmdR::Coro::AllocFrame(size_t size, CommandContext* cmd) {
+  void* ptr = cmd->TryInlineAlloc(size + 1);
+  if (ptr) {
+    static_cast<char*>(ptr)[size] = 1;
+    return ptr;
+  }
+  ptr = ::operator new(size + 1);
+  static_cast<char*>(ptr)[size] = 0;
+  return ptr;
+}
 
 bool SingleHopWaiter::await_ready() noexcept {
   auto* tx = cmd_cntx->tx();

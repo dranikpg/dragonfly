@@ -208,7 +208,7 @@ class ParsedCommand : public cmn::BackedArguments {
 };
 
 #ifdef __linux__
-static_assert(sizeof(ParsedCommand) == 240);
+static_assert(sizeof(ParsedCommand) == 344);
 #endif
 
 }  // namespace facade

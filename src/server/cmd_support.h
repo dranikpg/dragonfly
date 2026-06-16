@@ -83,7 +83,7 @@ constexpr CmdR kAborted = {};
 // Underlying driver (promise) of coroutine that defines its context
 struct CmdR::Coro {
   // Coroutine created of a top level command
-  Coro(facade::CmdArgParser, CommandContext* cmd) : cmd_cntx{cmd} {
+  Coro(facade::CmdArgParser&, CommandContext* cmd) : cmd_cntx{cmd} {
   }
 
   // Coroutine created of a internal function with arguments
@@ -92,26 +92,14 @@ struct CmdR::Coro {
 
   // Custom allocation: try to place the coroutine frame in the BackedArguments inline buffer.
   // Reserves one extra byte as a flag indicating inline (1) vs heap (0) allocation.
-  static void* operator new(size_t size, facade::CmdArgParser, CommandContext* cmd) {
-    void* ptr = cmd->TryInlineAlloc(size + 1);
-    if (ptr) {
-      static_cast<char*>(ptr)[size] = 1;
-      return ptr;
-    }
-    ptr = ::operator new(size + 1);
-    static_cast<char*>(ptr)[size] = 0;
-    return ptr;
+  static void* AllocFrame(size_t size, CommandContext* cmd);
+
+  static void* operator new(size_t size, facade::CmdArgParser&, CommandContext* cmd) {
+    return AllocFrame(size, cmd);
   }
 
   template <typename... Ts> static void* operator new(size_t size, CommandContext* cmd, Ts...) {
-    void* ptr = cmd->TryInlineAlloc(size + 1);
-    if (ptr) {
-      static_cast<char*>(ptr)[size] = 1;
-      return ptr;
-    }
-    ptr = ::operator new(size + 1);
-    static_cast<char*>(ptr)[size] = 0;
-    return ptr;
+    return AllocFrame(size, cmd);
   }
 
   static void operator delete(void* ptr, size_t size) {
