@@ -130,6 +130,27 @@ class BackedArguments {
     storage_.resize(last_offs);
   }
 
+  // Try to allocate `needed` bytes from the unused tail of the inline storage buffer.
+  // Returns nullptr if storage has spilled to heap or there's not enough inline space.
+  // The returned memory is valid as long as this BackedArguments is alive and storage_ is not
+  // modified (which holds true during command execution after parsing).
+  void* TryInlineAlloc(size_t needed, size_t align = alignof(std::max_align_t)) {
+    // Only use the inline buffer — if storage_ spilled to heap, the "free" tail is heap memory
+    // that might be reallocated.
+    if (storage_.capacity() > kStorageCap)
+      return nullptr;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(storage_.data()) + storage_.size();
+    uintptr_t aligned = (base + align - 1) & ~(align - 1);
+    size_t padding = aligned - base;
+
+    if (storage_.size() + padding + needed > kStorageCap)
+      return nullptr;
+
+    storage_.resize(storage_.size() + padding + needed);
+    return reinterpret_cast<void*>(aligned);
+  }
+
  protected:
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
 

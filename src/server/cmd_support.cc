@@ -20,13 +20,15 @@ bool SingleHopWaiter::await_ready() noexcept {
   } else {
     // Schedule async hop and keep transaction alive
     tx->SingleHopAsync(callback);
-    tx_keepalive_ = tx;
+    // Multi transactions are kept alive by the squasher/exec context — skip the extra ref-count.
+    if (!tx->IsMulti())
+      tx_keepalive_ = tx;
     return false;
   }
 }
 
 void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
-  cmd_cntx->Resolve(tx_keepalive_->Blocker(), handle);
+  cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), handle);
 }
 
 facade::OpStatus SingleHopWaiter::await_resume() const noexcept {

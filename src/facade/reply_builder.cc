@@ -363,7 +363,7 @@ void RedisReplyBuilderBase::SendBulkStringBorrowed(cmn::BorrowedString bs) {
   // Drain all iovecs (including any WriteRef into bs.view()) before this
   // function returns. ~BorrowedString releases the pin afterward — by then
   // the source bytes are already in the kernel.
-  Flush();
+  // Flush();
 }
 
 void RedisReplyBuilderBase::SendLong(long val) {

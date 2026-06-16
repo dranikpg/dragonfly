@@ -90,6 +90,36 @@ struct CmdR::Coro {
   template <typename... Ts> explicit Coro(CommandContext* cmd, const Ts&... ts) : cmd_cntx{cmd} {
   }
 
+  // Custom allocation: try to place the coroutine frame in the BackedArguments inline buffer.
+  // Reserves one extra byte as a flag indicating inline (1) vs heap (0) allocation.
+  static void* operator new(size_t size, facade::CmdArgParser, CommandContext* cmd) {
+    void* ptr = cmd->TryInlineAlloc(size + 1);
+    if (ptr) {
+      static_cast<char*>(ptr)[size] = 1;
+      return ptr;
+    }
+    ptr = ::operator new(size + 1);
+    static_cast<char*>(ptr)[size] = 0;
+    return ptr;
+  }
+
+  template <typename... Ts> static void* operator new(size_t size, CommandContext* cmd, Ts...) {
+    void* ptr = cmd->TryInlineAlloc(size + 1);
+    if (ptr) {
+      static_cast<char*>(ptr)[size] = 1;
+      return ptr;
+    }
+    ptr = ::operator new(size + 1);
+    static_cast<char*>(ptr)[size] = 0;
+    return ptr;
+  }
+
+  static void operator delete(void* ptr, size_t size) {
+    if (static_cast<char*>(ptr)[size] == 0)
+      ::operator delete(ptr);
+    // inline-allocated: no-op, lifetime managed by storage_
+  }
+
   // Use it waiter directly cases when it needs to stay in scope to keep the transaction alive
   auto& await_transform(SingleHopWaiter& waiter) const {
     return waiter;
