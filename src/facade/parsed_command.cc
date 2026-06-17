@@ -118,10 +118,11 @@ void ParsedCommand::SendReply() {
   auto payload_handler = [this](payload::Payload& pl) {
     CapturingReplyBuilder::Apply(std::move(pl), rb_);
   };
-  auto task_handler = [](SuspendedCommand& task) {
+  auto task_handler = [this](SuspendedCommand& task) {
     DCHECK(task.coro);
     task.coro.resume();
-    task.coro = {};
+    // Coroutine is now at final_suspend — frame stays alive so reply data remains valid.
+    // The frame is destroyed later by ~SuspendedCommand (via ResetForReuse or dtor).
   };
   std::visit(dfly::Overloaded{task_handler, payload_handler}, reply_);
 }

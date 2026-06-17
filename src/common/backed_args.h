@@ -14,7 +14,7 @@ namespace cmn {
 
 class BackedArguments {
   constexpr static size_t kLenCap = 5;
-  constexpr static size_t kStorageCap = 190;
+  constexpr static size_t kStorageCap = 224;
 
   constexpr static size_t kShrinkFloor = 64 << 10;  // 64 KiB
 
@@ -147,7 +147,8 @@ class BackedArguments {
     if (storage_.size() + padding + needed > kStorageCap)
       return nullptr;
 
-    storage_.resize(storage_.size() + padding + needed);
+    // The inline buffer memory already exists up to kStorageCap — just return a pointer into it.
+    // Don't resize storage_ so elem_len() for the last arg stays correct.
     return reinterpret_cast<void*>(aligned);
   }
 
@@ -158,7 +159,7 @@ class BackedArguments {
   absl::InlinedVector<char, kStorageCap> storage_;
 };
 
-static_assert(sizeof(BackedArguments) == 232);
+static_assert(sizeof(BackedArguments) == 264);
 
 template <typename I> void BackedArguments::Assign(I begin, I end, size_t len) {
   offsets_.resize(len);

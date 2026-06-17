@@ -137,7 +137,7 @@ struct CmdR::Coro {
   std::suspend_never initial_suspend() noexcept {
     return {};
   }
-  std::suspend_never final_suspend() noexcept {
+  std::suspend_always final_suspend() noexcept {
     return {};
   }
 
