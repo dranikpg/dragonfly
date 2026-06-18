@@ -447,19 +447,18 @@ class CommandContext : public facade::ParsedCommand {
 
   uint64_t start_time_usec = 0;
 
-  // Stores backing array for tail args slice
-  CmdArgVec arg_slice_backing;
-
  protected:
   void ReuseInternal() final;
 
-  // Command arguments without the command name. Replaces arg_slice_backing as the
-  // canonical arg source once all handlers are migrated. Points into BackedArguments
-  // owned by this CommandContext (or StoredCmd for EXEC), so it survives async execution.
+  // Uses ParsedArgs instead of ArgSlice passed down the call chain. TODO: unify and remove
   facade::ParsedArgs tail_args_;
 
   Transaction* tx_ = nullptr;
   const CommandId* cid_ = nullptr;
 };
+
+// 320 is a mi_good_size boundary.
+// The previous boundary of 256 would require making backed_args buffers much smaller
+static_assert(sizeof(CommandContext) == 320);
 
 }  // namespace dfly

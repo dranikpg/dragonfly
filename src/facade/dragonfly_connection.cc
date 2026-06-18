@@ -2729,7 +2729,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   parsed_cmd_q_len_++;
   parsed_cmd_q_bytes_ += used_mem;
   local_stats_.dispatch_entries_added++;
@@ -2761,7 +2761,7 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   DCHECK_GT(parsed_cmd_q_len_, 0u);

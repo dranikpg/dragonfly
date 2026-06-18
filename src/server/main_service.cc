@@ -1482,15 +1482,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     cmd_cntx->conn()->FlushReplies();
   }
 
-  cmd_cntx->SetTailArgs(args_no_cmd);
+  // Tail args become invalid for deferred commands, but they rely on args_no_cmd instead
+  CmdArgVec tail_args_backing;
+  auto tail_args = args_no_cmd.ToSlice(&tail_args_backing);
 
-  ArgSlice tail_args;
-  if (cmd_cntx->IsDeferredReply()) {
-    args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
-    tail_args = cmd_cntx->arg_slice_backing;
-  } else {
-    tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
-  }
+  cmd_cntx->SetTailArgs(args_no_cmd);
 
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {

@@ -148,7 +148,9 @@ class CommandId : public facade::CommandId {
   template <typename RT>
   CommandId&& SetAsyncHandler(RT f(facade::CmdArgParser, CommandContext*)) && {
     kind_mask_ |= SUPPORT_ASYNC;
-    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(MakeParserFromContext(cntx), cntx); };
+    handler_ = [f](CmdArgList /* unused */, CommandContext* cntx) {
+      f(MakeParserFromContext(cntx), cntx);
+    };
     return std::move(*this);
   }
 
