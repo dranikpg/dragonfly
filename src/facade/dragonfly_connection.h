@@ -186,7 +186,8 @@ class Connection : public util::Connection {
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
-  void FlushReplies();
+  // Flushes pending replies and returns the reply builder's error code (empty on success).
+  std::error_code FlushReplies();
 
   // Manually shutdown self.
   void ShutdownSelfBlocking();
@@ -262,6 +263,13 @@ class Connection : public util::Connection {
   size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
+
+  // For non replication connections refresh memory usage field as well as update tl stats if conn.
+  // is still live.
+  void RefreshConnectionMemoryUsage();
+
+  // Sets to false on switching to replication to remove accounting for direct bytes
+  void SetConnectionMemoryAccounting(bool enabled);
 
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // If force is false, the connection will migrate at most once,
@@ -463,6 +471,35 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ReplyBatch();
 
+  // True if this connection is actively contributing to the pipeline queue and that queue is
+  // over the per-thread backpressure limit. The single source of truth for parse throttling.
+  bool IsOverPipelineLimit() const;
+
+  // Notifies other connections that pipeline memory may have been freed, by comparing the
+  // current thread pipeline byte count against `bytes_before`.
+  void NotifyIfMemReleased(size_t bytes_before);
+
+  // True if a thread migration was requested and is actionable now (no active subscriptions).
+  bool IsReadyToMigrate() const;
+
+  // Control events that warrant leaving any park (idle or backpressure), independent of new input
+  // or pipeline memory: a reply became ready, control messages are queued, the socket errored, or
+  // a migration is pending.
+  bool HasControlEvent() const;
+
+  // Wake condition for the idle park: HasControlEvent() plus incoming data and a head command
+  // ready to run.
+  bool ShouldWakeIdle() const;
+
+  // IoLoopV2 control path: drains dispatch_q_ up to `quota`. Returns true if the caller should
+  // restart the loop (so freshly arrived socket data is read before the data path runs), false to
+  // fall through to the data path.
+  bool DrainControlPath(uint32_t quota);
+
+  // IoLoopV2 data path when input is available and we are under the pipeline limit: parse, execute
+  // and reply. Returns the parser status.
+  ParserStatus RunParsePath();
+
   // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
@@ -490,6 +527,10 @@ class Connection : public util::Connection {
       parsed_tail_ = nullptr;
     }
   }
+
+  // Advance parsed_to_execute_ past the command it currently points at (now dispatched), keeping
+  // dispatch_waiting_count_ in sync. Returns the new parsed_to_execute_.
+  ParsedCommand* AdvanceToExecute();
 
   // Dispatch Queue - Queue for the Control Path.
   // Handles asynchronous administrative tasks, events, and high-priority control
@@ -539,6 +580,12 @@ class Connection : public util::Connection {
   // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
 
+  // Number of parsed commands not yet dispatched: the run [parsed_to_execute_, ..., parsed_tail_].
+  // Maintained incrementally (incremented on enqueue, decremented as parsed_to_execute_ advances)
+  // so the V2 squasher can pass an exact count starting at parsed_to_execute_ even when earlier
+  // commands are still in flight. Always <= parsed_cmd_q_len_.
+  size_t dispatch_waiting_count_ = 0;
+
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
 
@@ -565,6 +612,19 @@ class Connection : public util::Connection {
   uint32_t id_;
   Protocol protocol_;
   Phase phase_ = SETUP;
+
+  // True after IncreaseConnStats registers this connection in the current thread's stats.
+  // False before registration and after DecreaseConnStats unregisters it during close/migration.
+  bool conn_stats_registered_ = false;
+
+  // True while this connection contributes to connection_memory_bytes. Set false for
+  // replication-flow connections, whose direct memory is excluded from the client connection
+  // metric.
+  bool account_connection_memory_ = true;
+
+  // Last value this connection contributed to connection_memory_bytes. Refreshes compare the
+  // current memory usage with this baseline and apply only the delta to the thread-local total.
+  size_t accounted_connection_memory_bytes_ = 0;
 
   struct {
     size_t read_cnt = 0;                // total number of read calls
