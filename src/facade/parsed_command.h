@@ -154,6 +154,11 @@ class ParsedCommand : public cmn::BackedArguments {
     return std::get<SuspendedCommand>(reply_).blocker;
   }
 
+  // Whether this command will resume a coroutine on SendReply().
+  bool IsSuspendedReply() const {
+    return std::holds_alternative<SuspendedCommand>(reply_);
+  }
+
   // Assumes CanReply() is true. Sends reply
   void SendReply();
 
