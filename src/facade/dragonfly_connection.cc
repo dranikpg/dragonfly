@@ -750,9 +750,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       ssl_ctx_(ctx),
       service_(service),
       flags_(0) {
-  constexpr size_t kReqSz = sizeof(ParsedCommand);
-  static_assert(kReqSz <= 256);
-
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
     case Protocol::REDIS:
