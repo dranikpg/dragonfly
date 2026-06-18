@@ -1483,8 +1483,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     cmd_cntx->conn()->FlushReplies();
   }
 
-  cmd_cntx->SetTailArgs(args_no_cmd);
-
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {

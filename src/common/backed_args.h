@@ -14,7 +14,7 @@ namespace cmn {
 
 class BackedArguments {
   constexpr static size_t kLenCap = 5;
-  constexpr static size_t kStorageCap = 88;
+  constexpr static size_t kStorageCap = 128;
 
   constexpr static size_t kShrinkFloor = 64 << 10;  // 64 KiB
 
@@ -133,11 +133,9 @@ class BackedArguments {
  protected:
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
 
-  // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
+  // See CommandContext for storage cap size limits
   absl::InlinedVector<char, kStorageCap> storage_;
 };
-
-static_assert(sizeof(BackedArguments) == 128);
 
 template <typename I> void BackedArguments::Assign(I begin, I end, size_t len) {
   offsets_.resize(len);

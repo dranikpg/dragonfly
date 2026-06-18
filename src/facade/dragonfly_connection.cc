@@ -2964,7 +2964,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   parsed_cmd_q_len_++;
   dispatch_waiting_count_++;  // the newly appended tail command is not yet dispatched
   parsed_cmd_q_bytes_ += used_mem;
@@ -2997,7 +2997,7 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
-  size_t used_mem = cmd->EnqueuedBytes();
+  size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   DCHECK_GT(parsed_cmd_q_len_, 0u);
