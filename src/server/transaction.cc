@@ -176,7 +176,7 @@ Transaction::~Transaction() {
 void Transaction::InitBase(Namespace* ns, DbIndex dbid, CmdArgList args) {
   global_ = false;
   db_index_ = dbid;
-  full_args_ = args;
+  full_args_ = {args.begin(), args.end()};
   local_result_ = OpStatus::OK;
   stats_.coordinator_index = ProactorBase::me() ? ProactorBase::me()->GetPoolIndex() : kInvalidSid;
 

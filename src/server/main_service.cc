@@ -88,7 +88,7 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
-ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
+ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 8096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
@@ -884,8 +884,15 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
   auto& exec_info = dfly_cntx->conn_state.exec_info;
   const size_t old_size = exec_info.GetStoredCmdBytes();
 
-  // Moves arguments from parsed_cmd to body.
+  // SwapArgs inside StoredCmd moves heap storage out of parsed_cmd,
+  // so we must adjust the pipeline queue accounting for the delta.
+  size_t before = parsed_cmd->UsedMemory();
   exec_info.body.emplace_back(cid, parsed_cmd, tail_index);
+  size_t after = parsed_cmd->UsedMemory();
+  if (before != after) {
+    dfly_cntx->conn()->AdjustParsedCmdBytes(after - before);
+  }
+
   exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
   exec_info.is_write |= cid->IsJournaled();
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
@@ -1482,15 +1489,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     cmd_cntx->conn()->FlushReplies();
   }
 
-  cmd_cntx->SetTailArgs(args_no_cmd);
+  // Tail args become invalid for deferred commands, but they rely on args_no_cmd instead
+  CmdArgVec tail_args_backing;
+  auto tail_args = args_no_cmd.ToSlice(&tail_args_backing);
 
-  ArgSlice tail_args;
-  if (cmd_cntx->IsDeferredReply()) {
-    args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
-    tail_args = cmd_cntx->arg_slice_backing;
-  } else {
-    tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
-  }
+  cmd_cntx->SetTailArgs(args_no_cmd);
 
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
