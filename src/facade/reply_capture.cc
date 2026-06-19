@@ -5,6 +5,7 @@
 
 #include "absl/types/span.h"
 #include "base/logging.h"
+#include "facade/reply_payload.h"
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
@@ -51,7 +52,12 @@ void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
 
 void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   SKIP_LESS(ReplyMode::FULL);
-  Capture(BulkString{string{str}});
+  if (str.size() < 12 || str.size() > inline_buffer_.size())
+    return Capture(BulkString{std::string{str}});
+
+  memcpy(inline_buffer_.data(), str.data(), str.size());
+  Capture(BulkStringRef{std::string_view{inline_buffer_.data(), str.size()}});
+  inline_buffer_ = inline_buffer_.subspan(str.size());
 }
 
 // Capture the borrow into the payload, extending the pin's lifetime until
@@ -130,6 +136,10 @@ struct CaptureVisitor {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
   }
 
+  void operator()(const payload::BulkStringRef& bs) {
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
+  }
+
   void operator()(const cmn::BorrowedString& bs) {
     static_cast<RedisReplyBuilder*>(rb)->SendBulkStringBorrowed(bs);
   }
@@ -154,7 +164,7 @@ struct CaptureVisitor {
     }
     builder->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
-      visit(*this, std::move(pl));
+      visit(*this, pl);
   }
 
   SinkReplyBuilder* rb;

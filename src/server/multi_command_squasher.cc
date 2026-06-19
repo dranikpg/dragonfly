@@ -216,6 +216,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   for (auto& dispatched : sinfo.dispatched) {
     auto* ctx = &local_cntx;
     crb.SetReplyMode(dispatched.reply_mode);
+    if (dispatched.cmd_cntx)
+      crb.ProvideInlineBuffer(dispatched.cmd_cntx->GetInlineBuffer());
 
     // With tiered storage enabled, it makes sense to dispatch async commands concurrently
     // to allow concurrent disk operations. Tiered futures are only blocked on during replies
