@@ -608,7 +608,7 @@ class Transaction {
   absl::InlinedVector<LockFp, 4> kv_fp_;
 
   // Stores the full undivided command.
-  CmdArgList full_args_;
+  absl::InlinedVector<std::string_view, 4> full_args_;
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;

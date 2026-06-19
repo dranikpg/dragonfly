@@ -130,6 +130,12 @@ class BackedArguments {
     storage_.resize(last_offs);
   }
 
+  // Inlined buffer where the command arguments are stored.
+  // Can be used as a local buffer to store captured replies
+  std::span<char> GetInlineBuffer() {
+    return {storage_.begin(), std::max(kStorageCap, storage_.size())};
+  }
+
  protected:
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
 
