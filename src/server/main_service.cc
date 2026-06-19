@@ -884,8 +884,15 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
   auto& exec_info = dfly_cntx->conn_state.exec_info;
   const size_t old_size = exec_info.GetStoredCmdBytes();
 
-  // Moves arguments from parsed_cmd to body.
+  // SwapArgs inside StoredCmd moves heap storage out of parsed_cmd,
+  // so we must adjust the pipeline queue accounting for the delta.
+  size_t before = parsed_cmd->UsedMemory();
   exec_info.body.emplace_back(cid, parsed_cmd, tail_index);
+  size_t after = parsed_cmd->UsedMemory();
+  if (before != after) {
+    dfly_cntx->conn()->AdjustParsedCmdBytes(after - before);
+  }
+
   exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
   exec_info.is_write |= cid->IsJournaled();
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;

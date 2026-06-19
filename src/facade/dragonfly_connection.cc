@@ -2787,6 +2787,16 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
   }
 }
 
+void Connection::AdjustParsedCmdBytes(ssize_t delta) {
+  if (parsed_cmd_q_bytes_ == 0)
+    return;  // command dispatched synchronously, not in pipeline queue
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  DCHECK_GE(static_cast<ssize_t>(parsed_cmd_q_bytes_) + delta, 0);
+  DCHECK_GE(static_cast<ssize_t>(conn_stats.pipeline_queue_bytes) + delta, 0);
+  parsed_cmd_q_bytes_ += delta;
+  conn_stats.pipeline_queue_bytes += delta;
+}
+
 void Connection::DestroyParsedQueue() {
   while (parsed_head_ != nullptr) {
     auto* cmd = parsed_head_;
