@@ -88,7 +88,7 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
-ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
+ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 8096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
